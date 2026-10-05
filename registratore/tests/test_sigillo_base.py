@@ -337,3 +337,115 @@ def test_dispositivi_macchina_profinet_ethernet(cfg):
     assert "Ethernet Telecamera (192.168.0.11) di nuovo online (controllo del pannello)" in testi
     assert "Nome del dispositivo PROFINET n. 3 non leggibile (STATUS 8090)" in testi
     assert "ETHERNET_ELENCO" in tipi(reg)
+
+
+# ---------------------------------------------------------------- stato della CPU (v2.1)
+def test_modo_da_szl_snap7_1_e_3():
+    record = bytes([0x43, 0x01, 0xFF, 0x08]) + bytes(16)               # snap7 1.x: solo il record
+    assert s.modo_da_szl(record) == ("RUN", 0x08)
+    assert s.modo_da_szl(bytes([0, 20, 0, 1]) + record) == ("RUN", 0x08)  # snap7 3.x: lunghezza e n. record prima
+    assert s.modo_da_szl(bytes([0x43, 0x01, 0xFF, 0x04]))[0] == "STOP"
+    assert s.modo_da_szl(bytes([0x43, 0x01, 0xFF, 0x03]))[0] == "STOP"
+    assert s.modo_da_szl(bytes([0x43, 0x01, 0xFF, 0x05]))[0] == "AVVIO"
+    assert s.modo_da_szl(bytes(8)) == (None, None)
+
+
+def test_decodifica_cpu():
+    sim = s.SorgenteSimulata()
+    c = s.decodifica(sim.leggi())["cpu"]
+    assert 3.5 <= c["ciclo_ms"] <= 5.0 and c["ciclo_min_ms"] <= c["ciclo_ms"] <= c["ciclo_max_ms"]
+    assert c["avvii"] == 3 and 4990 <= c["secondi_da_avvio"] <= 5010
+    assert abs((s.dt.datetime.fromisoformat(c["ora"]) - s.dt.datetime.now()).total_seconds()) < 3
+    assert s.decodifica_cpu(bytearray(1822)) is None                       # DB della v2.0
+
+
+def test_cpu_run_stop_ora_e_avvii(cfg):
+    reg, sim = s.Registro(cfg["registro"]), s.SorgenteSimulata()
+    srv = s.Servizio(cfg, sim, reg)
+    srv.ciclo()
+    assert "Avvio o reinizializzazione del programma PLC (avvio n. 3)" in [e["descrizione"] for e in reg.eventi(10)]
+    assert srv.stato_cpu()["modo"] == "RUN" and srv.stato_cpu()["avvii"] == 3
+    sim.modo = "STOP"
+    for _ in range(5):
+        srv.ciclo()
+    assert tipi(reg).count("CPU_STOP") == 1 and "VITA_FERMA" not in tipi(reg)   # STOP spiega la vita ferma
+    sim.modo = "RUN"
+    srv.ciclo(); srv.ciclo()
+    assert tipi(reg)[-1] == "CPU_RUN"
+    # orologio della CPU indietro di 10 minuti: registrato una volta, poi di nuovo allineato
+    sim.scarto_ora = -600
+    srv.ciclo(); srv.ciclo()
+    assert tipi(reg).count("ORA_CPU_ERRATA") == 1 and "indietro di 10 min" in reg.eventi(1)[0]["descrizione"]
+    assert srv.stato_cpu()["ora_errata"] and abs(srv.stato_cpu()["differenza_ora_s"] + 600) <= 2
+    sim.scarto_ora = 0
+    srv.ciclo()
+    assert tipi(reg)[-1] == "ORA_CPU_OK" and reg.verifica()["integro"]
+    # un registratore riavviato non ripete lo stato gia' registrato
+    srv2 = s.Servizio(cfg, sim, reg)
+    srv2.ciclo()
+    assert tipi(reg).count("CPU_RUN") == 1 and not srv2.cpu["ora_errata"]
+
+
+def test_vita_ferma_con_cpu_in_run(cfg):
+    reg, sim = s.Registro(cfg["registro"]), s.SorgenteSimulata()
+    srv = s.Servizio(cfg, sim, reg)
+    fermo = bytearray(sim.leggi())
+
+    class FbFermo:
+        def leggi(self):
+            return bytearray(fermo)
+
+        def modo_cpu(self):
+            return "RUN", 0x08
+
+        def descrizione(self):
+            return "fb fermo"
+    srv.src = FbFermo()
+    for _ in range(4):
+        srv.ciclo()
+    assert "FB_SigilloBase non in esecuzione (CPU in RUN)" in [e["descrizione"] for e in reg.eventi(5)]
+
+
+def test_modo_non_leggibile(cfg):
+    reg, sim = s.Registro(cfg["registro"]), s.SorgenteSimulata()
+
+    def guasto():
+        raise RuntimeError("Read SZL failed")
+    sim.modo_cpu = guasto
+    srv = s.Servizio(cfg, sim, reg)
+    srv.ciclo()
+    assert srv.stato_cpu()["modo"] is None and "SZL" in srv.cpu["errore_modo"] and "CPU_STOP" not in tipi(reg)
+
+
+def test_api_cpu(cfg):
+    from fastapi.testclient import TestClient
+    cfg["token_pannello"] = "abc"
+    reg, sim = s.Registro(cfg["registro"]), s.SorgenteSimulata()
+    srv = s.Servizio(cfg, sim, reg)
+    srv.ciclo(); srv.ciclo()
+    c = TestClient(s.crea_app(cfg, reg, srv))
+    cpu = c.get("/api/stato").json()["cpu"]
+    assert cpu["modo"] == "RUN" and cpu["szl_bzu"] == "08" and cpu["avvii"] == 3 and cpu["ciclo_max_ms"] > 0
+    assert c.get("/api/pannello?token=abc").json()["cpu"]["modo"] == "RUN"
+
+
+def test_sorgente_plc_modo_dalla_szl(cfg):
+    pytest.importorskip("snap7")
+    from snap7.type import S7SZL
+    src = s.SorgentePLC(cfg)
+
+    class Cli:
+        def __init__(self, dati):
+            self.dati = dati
+
+        def read_szl(self, ssl_id, index):
+            assert (ssl_id, index) == (0x0424, 0)
+            szl = S7SZL()
+            szl.Header.LengthDR = len(self.dati)
+            for i, b in enumerate(self.dati):
+                szl.Data[i] = b
+            return szl
+    src.cli = Cli(bytes([0, 20, 0, 1, 0x43, 0x01, 0xFF, 0x04]) + bytes(16))   # come snap7 3.x
+    assert src.modo_cpu() == ("STOP", 0x04)
+    src.cli = Cli(bytes([0x43, 0x01, 0xFF, 0x08]) + bytes(16))                 # come snap7 1.x
+    assert src.modo_cpu() == ("RUN", 0x08)
