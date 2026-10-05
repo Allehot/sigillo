@@ -2,12 +2,12 @@ FUNCTION_BLOCK "FB_SigilloBase"
 TITLE = 'Sigillo Base - modifiche a programma, firma F, hardware e parametri'
 { S7_Optimized_Access := 'TRUE' }
 AUTHOR : SDM
-VERSION : 2.0
+VERSION : 2.1
 // Da chiamare in OB1 a ogni ciclo, una sola istanza.
 // AvvioConsentito NON e' una funzione di sicurezza: impedisce solo l'avvio del ciclo
 // automatico con programma o hardware non approvati.
 //
-// Eventi:  1 avvio CPU / reinizializzazione   2 programma e hardware approvati
+// Eventi:  1 avvio CPU / reinizializzazione (ValNuovo = n. di avvii)   2 programma e hardware approvati
 //          3 programma diverso dall'approvato  4 programma tornato uguale
 //          5 firma F cambiata                  6 avvio automatico bloccato
 //          7 avvio automatico sbloccato        8 errore lettura checksum (Extra = STATUS)
@@ -24,6 +24,10 @@ VERSION : 2.0
 // DA VERIFICARE AL BANCO: DeviceStates (MODE 1 = configurati, 4 = presenti) e la costante
 // di sistema dell'IO-System PROFINET da collegare a LaddrIoSystem. Get_Name: verificato senza REQ
 // (parametri LADDR, STATION_NR, DATA, DONE, ERROR, STATUS). Nomi letti per i dispositivi 1..16.
+//
+// Stato della CPU (v2.1): tempo di ciclo misurato con RUNTIME tra una chiamata e la successiva
+// (quindi il tempo di ciclo dell'OB che chiama il FB, di norma OB1), ora locale della CPU,
+// numero di avvii e tempo dall'ultimo avvio. RUN/STOP non sta qui: lo legge il registratore.
    VAR_INPUT
       PeriodoControllo : Time := T#10S;
       FirmaF : DWord;                      // da F_SYST_INFO; 16#0 se la CPU non e' F
@@ -82,6 +86,10 @@ VERSION : 2.0
       chiamate : Int;                      // chiamate a Get_Name per il dispositivo in corso
       nomeLetto : String[254];
       nomiAvviati : Bool;
+      // stato della CPU
+      memRuntime : LReal;                  // memoria di RUNTIME
+      misureCiclo : Int;                   // misure dopo l'avvio: le prime due si scartano
+      secondiAvvio : LReal;                // tempo dall'avvio, somma dei tempi di ciclo
    END_VAR
 
    VAR_TEMP
@@ -96,6 +104,9 @@ VERSION : 2.0
       onAtt : Bool;
       onPrec : Bool;
       maschera : Word;
+      tCiclo : LReal;                      // tempo dall'ultima chiamata [s]
+      msCiclo : Real;
+      oraCpu : DTL;
    END_VAR
 
 
@@ -115,6 +126,14 @@ BEGIN
 	    #req := TRUE;
 	    #reqIM := TRUE;
 	    #ultimaFirmaF := #FirmaF;
+	    #misureCiclo := 0;
+	    #secondiAvvio := 0.0;
+	    "DB_SigilloBase".Cpu.CicloMin := 0.0;
+	    "DB_SigilloBase".Cpu.CicloMax := 0.0;
+	    IF "DB_SigilloBase".Cpu.Avvii < 0 OR "DB_SigilloBase".Cpu.Avvii >= 2000000000 THEN
+	        "DB_SigilloBase".Cpu.Avvii := 0;
+	    END_IF;
+	    "DB_SigilloBase".Cpu.Avvii := "DB_SigilloBase".Cpu.Avvii + 1;
 	    #ultimoQuadro := #QuadroAperto;
 	    #ultimaChiave := #ChiaveManutenzione;
 	    FOR #i := 1 TO 16 DO
@@ -123,7 +142,36 @@ BEGIN
 	        #ultimoMax[#i] := "DB_SigilloBase".Limiti[#i].Max;
 	        #ultimoAttivo[#i] := "DB_SigilloBase".Limiti[#i].Attivo;
 	    END_FOR;
-	    "FC_SigilloBaseEvento"(Tipo := 1, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := #FirmaF);
+	    "FC_SigilloBaseEvento"(Tipo := 1, Indice := 0, ValPrec := 0.0,
+	                           ValNuovo := DINT_TO_REAL("DB_SigilloBase".Cpu.Avvii), Extra := #FirmaF);
+	END_IF;
+	
+	// ---------------------------------------------------------------- stato della CPU
+	// RUNTIME restituisce il tempo trascorso dalla chiamata precedente: chiamato una volta per ciclo
+	// misura il tempo di ciclo. La prima misura dopo l'avvio non e' valida (la memoria parte da zero)
+	// e la seconda comprende l'avvio: si scartano entrambe.
+	#tCiclo := RUNTIME(MEM := #memRuntime);
+	IF #misureCiclo < 2 THEN
+	    #misureCiclo := #misureCiclo + 1;
+	ELSE
+	    #msCiclo := LREAL_TO_REAL(#tCiclo * 1000.0);
+	    "DB_SigilloBase".Cpu.CicloAtt := #msCiclo;
+	    IF "DB_SigilloBase".Cpu.AzzeraCiclo OR "DB_SigilloBase".Cpu.CicloMin <= 0.0
+	       OR #msCiclo < "DB_SigilloBase".Cpu.CicloMin THEN
+	        "DB_SigilloBase".Cpu.CicloMin := #msCiclo;
+	    END_IF;
+	    IF "DB_SigilloBase".Cpu.AzzeraCiclo OR #msCiclo > "DB_SigilloBase".Cpu.CicloMax THEN
+	        "DB_SigilloBase".Cpu.CicloMax := #msCiclo;
+	    END_IF;
+	    "DB_SigilloBase".Cpu.AzzeraCiclo := FALSE;
+	    IF #secondiAvvio < 2.0E9 THEN
+	        #secondiAvvio := #secondiAvvio + #tCiclo;
+	    END_IF;
+	    "DB_SigilloBase".Cpu.SecondiDaAvvio := LREAL_TO_DINT(#secondiAvvio);
+	END_IF;
+	#ret := RD_LOC_T(#oraCpu);
+	IF #ret = 0 THEN
+	    "DB_SigilloBase".Cpu.Ora := #oraCpu;
 	END_IF;
 	
 	// ---------------------------------------------------------------- hardware: identita' CPU

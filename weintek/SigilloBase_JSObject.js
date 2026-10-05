@@ -1,5 +1,5 @@
 /*
- * Sigillo Base v2.0 – JS Object per pannelli Weintek cMT-X (EasyBuilder Pro 6.05.02 o successivo)
+ * Sigillo Base v2.1 – JS Object per pannelli Weintek cMT-X (EasyBuilder Pro 6.05.02 o successivo)
  *
  * Il PLC contiene solo stato, eventi, parametri, hardware e dispositivi PROFINET.
  * L'elenco dei dispositivi Ethernet sta nella memoria del pannello; elenco della rete, MAC,
@@ -10,13 +10,18 @@
  *   dbEst           assoluto, DB n byte 1094, Conteggio 135
  *   dbPn            assoluto, DB n byte 1364, Conteggio 229   (PROFINET e nomi)
  *   ethStato        assoluto, DB n byte 1396, Conteggio 3     (il pannello scrive lo stato Ethernet)
+ *   dbCpu           assoluto, DB n byte 1822, Conteggio 17    (stato della CPU, facoltativo)
  *   ethMemoria      Local HMI, RW (es. RW-1000), 16-bit Unsigned, Conteggio 192 (elenco Ethernet, ritentivo)
  *   cmdApprova      tag DB_SigilloBase.Cmd.ImpostaRiferimento   Bit
  *   cmdSblocca      tag DB_SigilloBase.Cmd.SbloccaAvvio         Bit
  *   pnRileggi       tag DB_SigilloBase.PnCmd.Rileggi            Bit (facoltativo)
+ *   cpuAzzera       tag DB_SigilloBase.Cpu.AzzeraCiclo          Bit (facoltativo)
  *   abilitaComandi  bit interno, es. LB-9000 (facoltativo): a 1 solo con amministratore loggato
  * Se il driver non legge un blocco lungo, dividilo in pezzi da 62 parole: campo2, campo3...
  * (es. dbPn2 dal byte 1488, dbPn3 dal 1612, dbPn4 dal 1736).
+ *
+ * RUN / STOP: il pannello lo deduce dal contatore di vita (fermo = CPU in STOP o FB non chiamato)
+ * e lo riceve preciso dal registratore, che lo legge dalla CPU con snap7, quando e' raggiungibile.
  */
 const self = this;
 
@@ -30,6 +35,7 @@ const NOMI_PARAMETRI = [
 ];
 const FONT = "Arial";
 const SONDA_OGNI_MS = 5000, SONDA_TENTATIVI_OFFLINE = 3, REGISTRATORE_OGNI_MS = 5000;
+const TOLLERANZA_ORA_S = 60;   // differenza massima tra l'orologio della CPU e quello del pannello
 
 // ------------------------------------------------------------------ costanti
 // [campo, parole, byte di partenza]; i campi con numero sono facoltativi (lettura divisa)
@@ -38,7 +44,8 @@ function blocchi(campo, inizio, parole) {
   for (let k = 1; k * 62 < parole; k++) out.push([campo + (k + 1), Math.min(62, parole - k * 62), inizio + k * 124]);
   return out;
 }
-const BLOCCHI = { stato: blocchi("dbStato", 0, 35), est: blocchi("dbEst", 1094, 135), pn: blocchi("dbPn", 1364, 229) };
+const BLOCCHI = { stato: blocchi("dbStato", 0, 35), est: blocchi("dbEst", 1094, 135), pn: blocchi("dbPn", 1364, 229),
+                  cpu: blocchi("dbCpu", 1822, 17) };
 const COL = {
   fondo: "#E8ECEF", pannello: "#F8FAFB", inchiostro: "#15212B", tenue: "#56646F", riga: "#C9D1D8",
   petrolio: "#0A5F63", ok: "#1D7446", okFondo: "#E3F0E8", allarme: "#B3261E", allarmeFondo: "#F6E1DF",
@@ -51,7 +58,7 @@ this.widget.add(canvas);
 this.widget.add(area);
 const W = canvas.width, H = canvas.height;
 
-let stato = null, errore = null, vitaPrec = null, vitaFerma = 0;
+let stato = null, errore = null, vitaPrec = null, vitaFerma = 0, vitaMossa = false;
 let dialogo = null, avviso = null, inAttesa = null, lettura = false, bottoni = [], scheda = "stato", vista = "macchina";
 // elenco Ethernet (memoria del pannello) e stato del suo controllo
 let ethRighe = [], ethLetto = false;
@@ -83,6 +90,15 @@ function firmware(b, o) {
   return (b[o] > 32 && b[o] < 127 ? String.fromCharCode(b[o]) : "V") + b[o + 1] + "." + b[o + 2] + "." + b[o + 3];
 }
 function numero(v) { return Math.abs(v) >= 1000 || Number.isInteger(v) ? String(Math.round(v * 100) / 100) : v.toFixed(2); }
+
+// Stato della CPU scritto dal FB (byte 1822..1855): tempi di ciclo, ora, avvii, tempo dall'avvio
+function decodificaCpu(c) {
+  const anno = (c[12] << 8) | c[13];
+  const ora = anno ? new Date(anno, c[14] - 1, c[15], c[17], c[18], c[19]) : null;
+  return { ciclo: f32(c, 0), cicloMin: f32(c, 4), cicloMax: f32(c, 8), ora: ora,
+           differenza: ora ? Math.round((ora.getTime() - Date.now()) / 1000) : null,   // secondi, + = CPU avanti
+           avvii: i32(c, 24), secondiDaAvvio: i32(c, 28) };
+}
 
 // b: byte 0..69 · e: 1094..1363 · p: 1364..1821 (offset relativi)
 function decodifica(b, e, p, abilitato) {
@@ -145,9 +161,12 @@ async function leggi() {
     const b = await leggiArea(BLOCCHI.stato);
     const e = await leggiArea(BLOCCHI.est);
     const p = self.config.dbPn ? await leggiArea(BLOCCHI.pn) : new Uint8Array(458);
+    const c = self.config.dbCpu ? await leggiArea(BLOCCHI.cpu) : null;
     let abilitato = true;
     if (self.config.abilitaComandi) abilitato = !!(await leggiCampo("abilitaComandi", 1))[0];
     stato = decodifica(b, e, p, abilitato);
+    stato.cpu = c ? decodificaCpu(c) : null;
+    vitaMossa = vitaPrec !== null && stato.vita !== vitaPrec;
     vitaFerma = vitaPrec !== null && stato.vita === vitaPrec ? vitaFerma + 1 : 0;
     vitaPrec = stato.vita;
     errore = null;
@@ -170,10 +189,11 @@ function controllaConferma() {
 
 async function comandoPlc(tipo) {
   try {
-    const campo = tipo === "approva" ? "cmdApprova" : tipo === "sblocca" ? "cmdSblocca" : "pnRileggi";
+    const campo = { approva: "cmdApprova", sblocca: "cmdSblocca", rileggi: "pnRileggi", azzera: "cpuAzzera" }[tipo];
     if (!self.config[campo]) throw new Error("campo " + campo + " non configurato");
     await driver.promises.setData(self.config[campo], [1]);
     if (tipo === "rileggi") avvisa("Lettura dei nomi PROFINET avviata.", false);
+    else if (tipo === "azzera") avvisa("Tempo di ciclo minimo e massimo azzerati.", false);
     else {
       inAttesa = { tipo: tipo, fino: Date.now() + 20000,
                    messaggio: tipo === "approva" ? "Programma approvato." : "Avvio automatico sbloccato." };
@@ -420,10 +440,34 @@ function testoCollegamenti() {
   return parti.length ? parti.join(", ") : "tutti i dispositivi online, nessun esterno";
 }
 
+// RUN / STOP: preciso dal registratore (snap7), altrimenti dedotto dal contatore di vita.
+// Il contatore e' il dato piu' fresco: se si muove la CPU e' in RUN anche se il registratore dice ancora STOP.
+function statoCpu() {
+  if (!stato || errore) return null;
+  const r = registratoreAttivo() && reg.cpu ? reg.cpu.modo : null;
+  if (vitaFerma >= 5) {
+    if (r === "STOP") return { modo: "STOP", testo: "STOP", fonte: "letto dal registratore" };
+    if (r === "RUN") return { modo: "FB", testo: "RUN, ma FB_SigilloBase fermo", fonte: "letto dal registratore" };
+    return { modo: "FERMO", testo: "STOP o FB_SigilloBase fermo", fonte: "contatore di vita fermo" };
+  }
+  if (r === "RUN" || r === "STOP" && vitaMossa) return { modo: "RUN", testo: "RUN", fonte: r === "RUN" ? "letto dal registratore" : "contatore di vita in movimento" };
+  if (r === "STOP") return { modo: "STOP", testo: "STOP", fonte: "letto dal registratore" };
+  if (vitaMossa || vitaFerma > 0) return { modo: "RUN", testo: "RUN", fonte: "dedotto dal contatore di vita" };
+  return { modo: "", testo: "in verifica", fonte: "contatore di vita" };
+}
+
+// orologio della CPU confrontato con quello del pannello (solo mentre il FB aggiorna l'ora)
+function oraCpuErrata() {
+  return !!stato && !!stato.cpu && stato.cpu.differenza !== null && vitaFerma === 0 && Math.abs(stato.cpu.differenza) > TOLLERANZA_ORA_S;
+}
+
 function condizione() {
   if (errore) return ["PLC non raggiungibile", errore, COL.allarmeFondo, COL.allarme];
   if (!stato) return ["Lettura in corso…", "", COL.pannello, COL.tenue];
-  if (vitaFerma >= 5) return ["FB_SigilloBase non in esecuzione", "Il contatore di vita è fermo", COL.allarmeFondo, COL.allarme];
+  const cpu = statoCpu();
+  if (cpu.modo === "STOP") return ["CPU in STOP", "Letto dalla CPU dal registratore: il programma non è in esecuzione", COL.allarmeFondo, COL.allarme];
+  if (cpu.modo === "FB") return ["FB_SigilloBase non in esecuzione", "La CPU è in RUN ma il contatore di vita è fermo", COL.allarmeFondo, COL.allarme];
+  if (cpu.modo === "FERMO") return ["CPU in STOP o FB_SigilloBase non in esecuzione", "Il contatore di vita è fermo", COL.allarmeFondo, COL.allarme];
   if (stato.avvioBloccato) {
     const causa = !stato.riferimentoValido ? "Nessun programma approvato" : !stato.hwOk ? "CPU diversa da quella approvata"
                 : !stato.firmaFOk ? "Firma F cambiata" : !stato.checksumOk ? "Programma modificato" : "Modifica rilevata";
@@ -438,6 +482,7 @@ function condizione() {
   if (registratoreAttivo() && (reg.noti_offline || reg.accesso_cpu)) {
     return [reg.noti_offline ? "Dispositivo noto offline" : "Accesso alla CPU segnalato", testoCollegamenti(), COL.attFondo, COL.att];
   }
+  if (oraCpuErrata()) return ["Orologio della CPU sbagliato", "CPU " + testoDifferenza(stato.cpu.differenza) + " rispetto al pannello: le date del registro sono sbagliate", COL.attFondo, COL.att];
   return ["Programma uguale a quello approvato", "Nessuna modifica rilevata", COL.okFondo, COL.ok];
 }
 
@@ -445,7 +490,7 @@ function disegna() {
   bottoni = [];
   riquadro(0, 0, W, H, COL.fondo);
   const hT = 36, lw = 120;
-  [["stato", "Stato"], ["parametri", "Parametri"], ["dispositivi", "Dispositivi"]].forEach((t, i) => {
+  [["stato", "Stato"], ["parametri", "Parametri"], ["dispositivi", "Dispositivi"], ["cpu", "CPU"]].forEach((t, i) => {
     const x = 12 + i * (lw + 6), sel = scheda === t[0];
     font(14, sel);
     canvas.textBaseline = "middle";
@@ -464,9 +509,19 @@ function disegna() {
   riquadro(12, y0, W - 24, h, COL.pannello, COL.riga);
   if (scheda === "stato") disegnaStato(y0, h);
   else if (scheda === "parametri") disegnaParametri(y0, h);
+  else if (scheda === "cpu") disegnaCpu(y0, h);
   else disegnaDispositivi(y0, h);
   disegnaPiede(H - hPiede);
   if (dialogo) disegnaDialogo();
+}
+
+function testoCpu() {
+  const cpu = statoCpu(), c = stato && stato.cpu;
+  if (!cpu) return "";
+  const parti = [cpu.testo];
+  if (c && cpu.modo === "RUN") parti.push("ciclo " + ms(c.ciclo));
+  if (oraCpuErrata()) parti.push("orologio " + testoDifferenza(c.differenza));
+  return parti.join(", ");
 }
 
 function disegnaStato(y0, h) {
@@ -480,6 +535,7 @@ function disegnaStato(y0, h) {
     ["Quadro / manutenzione", stato ? (s.quadroAperto ? "quadro aperto" : "quadro chiuso") + ", " +
                                       (s.manutenzione ? "manutenzione inserita" : "manutenzione non inserita") : "", s.quadroAperto],
     ["Avvio automatico", stato ? (s.avvioBloccato ? "bloccato" : "consentito") : "", s.avvioBloccato],
+    ["Stato della CPU", testoCpu(), !!stato && !!statoCpu() && ["STOP", "FB", "FERMO"].indexOf(statoCpu().modo) >= 0 || oraCpuErrata()],
     ["Collegamenti", testoCollegamenti(), !!stato && (macchinaOffline().length > 0 || (registratoreAttivo() && (reg.esterni || reg.noti_offline || reg.accesso_cpu)))],
   ];
   const passo = Math.max(20, Math.min(40, Math.floor((h - 8) / righe.length)));
@@ -509,6 +565,53 @@ function disegnaParametri(y0, h) {
     testo(p.attivo ? numero(p.min) : "–", cMin, y, cMax - cMin - 8, p.attivo ? COL.inchiostro : COL.tenue);
     testo(p.attivo ? numero(p.max) : "–", cMax, y, W - cMax - 20, p.attivo ? COL.inchiostro : COL.tenue);
   });
+}
+
+// ------------------------------------------------------------------ disegno: CPU
+function due(n) { return (n < 10 ? "0" : "") + n; }
+function dataOra(d) {
+  return d ? due(d.getDate()) + "/" + due(d.getMonth() + 1) + "/" + d.getFullYear() + " " + due(d.getHours()) + ":" + due(d.getMinutes()) + ":" + due(d.getSeconds()) : "";
+}
+function durata(s) {
+  s = Math.abs(Math.round(s));
+  if (s < 120) return s + " s";
+  if (s < 7200) return Math.floor(s / 60) + " min";
+  if (s < 172800) return Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min";
+  return Math.floor(s / 86400) + " g " + Math.floor(s % 86400 / 3600) + " h";
+}
+function testoDifferenza(d) { return d === 0 ? "allineata" : (d > 0 ? "avanti" : "indietro") + " di " + durata(d); }
+function ms(v) { return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " ms"; }
+
+function disegnaCpu(y0, h) {
+  const cpu = statoCpu(), c = stato && stato.cpu;
+  if (stato && !self.config.dbCpu) {
+    font(14);
+    a_capo("Campo dbCpu non configurato nella scheda Config (DB n byte 1822, Conteggio 17): tempi di ciclo, ora e avvii non disponibili.",
+           26, y0 + 30, W - 60, 20, COL.tenue);
+  }
+  const fermo = !cpu || cpu.modo === "STOP" || cpu.modo === "FB" || cpu.modo === "FERMO";
+  const righe = [["Stato della CPU", cpu ? cpu.testo + " (" + cpu.fonte + ")" : "", !!cpu && fermo]];
+  if (c) {
+    const errata = oraCpuErrata();
+    righe.push(
+      ["Tempo di ciclo attuale", fermo ? "– (FB fermo)" : ms(c.ciclo)],
+      ["Tempo di ciclo min / max", ms(c.cicloMin) + " / " + ms(c.cicloMax)],
+      ["Ora della CPU", dataOra(c.ora) + (fermo && c.ora ? " (ferma)" : "")],
+      ["Rispetto al pannello", !c.ora || fermo ? "–" : "CPU " + testoDifferenza(c.differenza) + (errata ? ": date del registro sbagliate" : ""), errata],
+      ["Tempo dall'ultimo avvio", fermo ? "–" : durata(c.secondiDaAvvio)],
+      ["Numero di avvii", String(c.avvii)]);
+  }
+  const yR = c || !stato ? y0 : y0 + 60, hA = self.config.cpuAzzera ? 48 : 0;
+  const passo = Math.max(20, Math.min(36, Math.floor((h - (yR - y0) - hA - 8) / Math.max(righe.length, 1))));
+  righe.forEach((r, i) => {
+    const y = yR + Math.round(passo * 0.75) + i * passo;
+    font(13); testo(r[0], 26, y, W * 0.36, COL.tenue);
+    font(15, true); testo(r[1] || "–", 26 + W * 0.38, y, W * 0.56, r[2] ? COL.allarme : COL.inchiostro);
+  });
+  if (self.config.cpuAzzera && c) {
+    const puo = !errore && stato.abilitato && !inAttesa;
+    bottone(20, y0 + h - 44, 280, 36, "Azzera minimo e massimo", () => comandoPlc("azzera"), { disattivo: !puo });
+  }
 }
 
 // ------------------------------------------------------------------ disegno: dispositivi

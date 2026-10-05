@@ -65,10 +65,11 @@ CONFIG_DEFAULT = {
     "nomi_profinet": {},      # n. dispositivo PROFINET -> nome (come in TIA)
     "nomi_ethernet": {},      # riga dell'elenco Ethernet del pannello -> nome
     "syslog": {"abilitato": False, "porta": 514, "sorgenti": [], "accesso_minuti": 5},
+    "tolleranza_ora_s": 60,   # differenza massima tra l'orologio della CPU e quello di questo PC
 }
 
 # Disposizione di DB_SigilloBase (accesso standard, big-endian)
-DIM_DB = 1822
+DIM_DB = 1856
 OFF_EVENTI, N_EVENTI, DIM_EVENTO = 70, 32, 32
 # Seq, Tipo, Indice, DTL (anno, mese, giorno, giorno sett., ora, min, sec, ns), Extra, ValPrec, ValNuovo
 FMT_EVENTO = ">ihhHBBBBBBIIff"
@@ -76,6 +77,8 @@ OFF_LIMITI, OFF_PARAM, OFF_HW = 1094, 1254, 1318
 OFF_FW_ATT, OFF_FW_RIF, OFF_SER_ATT, OFF_SER_RIF = 1320, 1324, 1328, 1346
 OFF_PN_CFG, OFF_PN_PRES, OFF_ETH = 1364, 1380, 1396     # dispositivi della macchina (stato)
 OFF_PN_NOMI, OFF_PN_ERR = 1404, 1820                    # nomi PROFINET letti con Get_Name (16 x String[24])
+OFF_CPU = 1822                                          # stato della CPU: cicli, ora, avvii, tempo dall'avvio
+FMT_DTL = ">HBBBBBBI"
 assert struct.calcsize(FMT_EVENTO) == DIM_EVENTO
 
 
@@ -96,6 +99,52 @@ def adesso():
 
 def _stringa_s7(b, o):
     return bytes(b[o + 2:o + 2 + min(b[o + 1], b[o])]).decode("latin-1", "replace").strip()
+
+
+def leggi_dtl(b, o):
+    """DTL del PLC -> datetime (None se vuoto o non valido)."""
+    anno, mese, giorno, _wd, ora, mi, se, ns = struct.unpack_from(FMT_DTL, b, o)
+    try:
+        return dt.datetime(anno, mese, giorno, ora, mi, se, ns // 1000) if anno else None
+    except ValueError:
+        return None
+
+
+def durata_testo(secondi):
+    secondi = int(abs(secondi))
+    if secondi < 120:
+        return f"{secondi} s"
+    if secondi < 7200:
+        return f"{secondi // 60} min"
+    if secondi < 172800:
+        return f"{secondi // 3600} h {secondi % 3600 // 60} min"
+    return f"{secondi // 86400} g {secondi % 86400 // 3600} h"
+
+
+def modo_da_szl(dati):
+    """Modo operativo della CPU dal record della SZL 0x0424 -> ("RUN" | "AVVIO" | "STOP" | None, bzu-id).
+
+    Record: ereig (2 byte), ae (1 byte, sempre FF), bzu-id (1 byte, bit 0..3 = modo: 8 RUN, 5..7 avvio,
+    gli altri STOP). snap7 1.x restituisce il record da solo, snap7 3.x lo fa precedere dalla
+    lunghezza e dal numero dei record (4 byte): il record si riconosce dal byte ae = FF.
+    """
+    for o in (0, 4):
+        if len(dati) >= o + 4 and dati[o + 2] == 0xFF:
+            bzu = dati[o + 3]
+            m = bzu & 0x0F
+            return ("RUN" if m in (8, 9) else "AVVIO" if m in (5, 6, 7) else None if m == 0 else "STOP"), bzu
+    return None, None
+
+
+def decodifica_cpu(b):
+    """Stato della CPU scritto dal FB (v2.1); None con un DB della v2.0."""
+    if b is None or len(b) < DIM_DB:
+        return None
+    att, mn, mx = struct.unpack_from(">fff", b, OFF_CPU)
+    ora = leggi_dtl(b, OFF_CPU + 12)
+    avvii, secondi = struct.unpack_from(">ii", b, OFF_CPU + 24)
+    return {"ciclo_ms": round(att, 3), "ciclo_min_ms": round(mn, 3), "ciclo_max_ms": round(mx, 3),
+            "ora": ora.isoformat(timespec="seconds") if ora else None, "avvii": avvii, "secondi_da_avvio": secondi}
 
 
 def nome_pn(b, n):
@@ -146,7 +195,7 @@ def decodifica(b):
         "firma_f_rif": f"{struct.unpack_from('>I', b, 14)[0]:08X}", "firma_f_att": f"{struct.unpack_from('>I', b, 18)[0]:08X}",
         "checksum_rif": bytes(b[22:30]).hex().upper(), "checksum_att": bytes(b[30:38]).hex().upper(),
         "versione": bytes(b[40:40 + min(vlen, vmax)]).decode("latin-1", "replace").strip(), "versione_max": vmax,
-        "eventi": sorted(eventi, key=lambda e: e["seq"]),
+        "cpu": decodifica_cpu(b), "eventi": sorted(eventi, key=lambda e: e["seq"]),
     }
 
 
@@ -165,9 +214,32 @@ class SorgentePLC:
     def scrivi(self, offset, dati):
         self.cli.db_write(self.cfg["plc"]["db"], offset, bytearray(dati))
 
+    def modo_cpu(self):
+        """RUN / STOP letto direttamente dalla CPU (SZL 0x0424, modo operativo attuale).
+
+        DA VERIFICARE AL BANCO: il byte bzu-id viene mostrato nella pagina web (stato della CPU).
+        get_cpu_state() si usa solo con snap7 1.x: nella 3.x restituisce sempre RUN senza chiedere alla CPU.
+        """
+        try:
+            szl = self.cli.read_szl(0x0424, 0)
+            return modo_da_szl(bytes(szl.Data[:max(int(szl.Header.LengthDR), 24)]))
+        except Exception:
+            if not snap7_libreria_c():
+                raise
+            return {"S7CpuStatusRun": "RUN", "S7CpuStatusStop": "STOP"}.get(self.cli.get_cpu_state()), None
+
     def descrizione(self):
         p = self.cfg["plc"]
         return f"PLC {p['ip']}, DB{p['db']}"
+
+
+def snap7_libreria_c():
+    """True con python-snap7 1.x/2.x (libreria C), dove get_cpu_state() interroga davvero la CPU."""
+    try:
+        from importlib.metadata import version
+        return int(version("python-snap7").split(".")[0]) < 3
+    except Exception:
+        return False
 
 
 class SorgenteSimulata:
@@ -179,6 +251,8 @@ class SorgenteSimulata:
         self.chk = os.urandom(8)
         self.rif = bytes(self.chk)
         self.bloccato = self.quadro = False
+        self.modo, self.avvii, self.avvio = "RUN", 3, time.time() - 5000
+        self.scarto_ora = 0.0                      # secondi di errore dell'orologio della CPU simulata
         self.param = [round(random.uniform(10, 500), 1) for _ in range(16)]
         self.limiti = [(round(p * 0.5, 1), round(p * 1.5, 1), i < 4) for i, p in enumerate(self.param)]
         self._stringa(38, 30, b"COMMESSA-DEMO-V1.0")
@@ -186,7 +260,7 @@ class SorgenteSimulata:
             self._stringa(o, 16, b"S C-T8A1ACYP")
         for o in (OFF_FW_ATT, OFF_FW_RIF):
             self.b[o:o + 4] = bytes([ord("V"), 4, 7, 0])
-        self.evento(1)
+        self.evento(1, vn=float(self.avvii))
         self.evento(2, extra=int.from_bytes(self.chk[:4], "big"))
         self.ultimo = time.time()
 
@@ -202,8 +276,20 @@ class SorgenteSimulata:
                          extra, vp, vn)
         self.idx = (self.idx + 1) % N_EVENTI
 
+    def modo_cpu(self):
+        return self.modo, 0x08 if self.modo == "RUN" else 0x04
+
     def leggi(self):
+        if self.modo != "RUN":                     # in STOP il FB non gira: vita, ora e cicli fermi
+            return bytearray(self.b)
         self.vita += 41
+        att = round(random.uniform(3.5, 5.0), 3)
+        mn, mx = struct.unpack_from(">ff", self.b, OFF_CPU + 4)
+        t = dt.datetime.now() + dt.timedelta(seconds=self.scarto_ora)
+        struct.pack_into(">fff", self.b, OFF_CPU, att, min(mn or att, att), max(mx, att))
+        struct.pack_into(FMT_DTL, self.b, OFF_CPU + 12, t.year, t.month, t.day, t.isoweekday() % 7 + 1,
+                         t.hour, t.minute, t.second, t.microsecond * 1000)
+        struct.pack_into(">ii", self.b, OFF_CPU + 24, self.avvii, int(time.time() - self.avvio))
         if time.time() - self.ultimo > 4:
             self.ultimo = time.time()
             r = random.random()
@@ -340,6 +426,9 @@ class Servizio:
         self.ultimo_buf = None              # ultimo DB letto: nomi e IP per descrivere gli eventi
         self.eth_pannello = reg.get("eth_pannello", [])        # elenco Ethernet comunicato dal pannello
         self.vita_ferma, self.vita_segnalata = 0, False
+        # stato della CPU: modo letto con snap7, differenza tra l'orologio della CPU e quello di questo PC
+        self.cpu = {"modo": None, "szl_bzu": None, "errore_modo": None, "differenza_ora_s": None,
+                    "ora_errata": reg.get("ora_cpu_errata", False)}
 
     def sistema(self, tipo, livello, testo, dati=None):
         self.reg.aggiungi("registratore", tipo, livello, testo, dati)
@@ -357,17 +446,22 @@ class Servizio:
         if self.connesso is False:
             self.sistema("COMUNICAZIONE_OK", "info", "Comunicazione con il PLC ripristinata")
         self.connesso, self.ultima_lettura = True, adesso()
+        modo = self.controlla_modo()
 
         vita_prec = self.reg.get("vita")
         if vita_prec is not None and d["vita"] == vita_prec:
             self.vita_ferma += 1
-            if self.vita_ferma >= self.cfg["vita_ferma_dopo_letture"] and not self.vita_segnalata:
-                self.sistema("VITA_FERMA", "allarme", "FB_SigilloBase non in esecuzione o CPU in STOP")
+            # in STOP il contatore e' fermo per forza: basta l'evento CPU_STOP
+            if self.vita_ferma >= self.cfg["vita_ferma_dopo_letture"] and not self.vita_segnalata and modo != "STOP":
+                self.sistema("VITA_FERMA", "allarme", "FB_SigilloBase non in esecuzione (CPU in RUN)" if modo == "RUN"
+                             else "FB_SigilloBase non in esecuzione o CPU in STOP")
                 self.vita_segnalata = True
         else:
             if self.vita_segnalata:
                 self.sistema("VITA_OK", "info", "FB_SigilloBase di nuovo in esecuzione")
             self.vita_ferma, self.vita_segnalata = 0, False
+            if vita_prec is not None:
+                self.controlla_ora(d["cpu"])          # l'ora nel DB e' aggiornata solo mentre il FB gira
         self.reg.set("vita", d["vita"])
 
         ultimo = self.reg.get("ultimo_seq", 0)
@@ -382,7 +476,9 @@ class Servizio:
         for e in nuovi:
             codice, livello, testo = TIPI.get(e["tipo"], (f"TIPO_{e['tipo']}", "attenzione", f"Evento {e['tipo']}"))
             nome = self.cfg["parametri"].get(str(e["indice"]), f"Parametro {e['indice']}")
-            if e["tipo"] in (2, 3, 4):
+            if e["tipo"] == 1 and e["val_nuovo"] >= 1:
+                testo += f" (avvio n. {int(e['val_nuovo'])})"
+            elif e["tipo"] in (2, 3, 4):
                 testo += f" (checksum {e['extra']:08X}...)"
             elif e["tipo"] == 14:
                 testo = f"{nome}: {e['val_prec']:g} -> {e['val_nuovo']:g}"
@@ -427,6 +523,55 @@ class Servizio:
                 self.reg.set("ultima_copia", time.time())
             except OSError as ex:
                 self.sistema("COPIA_FALLITA", "attenzione", "Copia periodica non riuscita", {"errore": str(ex)})
+
+    # -------------------------------------------------------------- stato della CPU
+    def controlla_modo(self):
+        """Legge RUN/STOP dalla CPU e registra i passaggi. Restituisce il modo (None se non leggibile)."""
+        leggi = getattr(self.src, "modo_cpu", None)
+        if leggi is None:
+            return None
+        try:
+            modo, bzu = leggi()
+            self.cpu.update(modo=modo, szl_bzu=None if bzu is None else f"{bzu:02X}", errore_modo=None)
+        except Exception as ex:
+            self.cpu.update(modo=None, errore_modo=str(ex)[:200])
+            return None
+        prec = self.reg.get("cpu_modo")
+        if modo in ("RUN", "STOP") and modo != prec:      # AVVIO e' un passaggio: non si registra
+            if modo == "STOP":
+                self.sistema("CPU_STOP", "allarme", "CPU in STOP", {"szl_bzu": self.cpu["szl_bzu"]})
+            elif prec is not None:
+                self.sistema("CPU_RUN", "info", "CPU di nuovo in RUN", {"szl_bzu": self.cpu["szl_bzu"]})
+            self.reg.set("cpu_modo", modo)
+        return modo
+
+    def controlla_ora(self, cpu):
+        """Confronta l'ora della CPU con quella di questo PC: se l'orologio della CPU e' sbagliato,
+        anche le date che il PLC scrive negli eventi lo sono."""
+        ora = dt.datetime.fromisoformat(cpu["ora"]) if cpu and cpu.get("ora") else None
+        if ora is None:
+            self.cpu["differenza_ora_s"] = None
+            return
+        diff = round((ora - dt.datetime.now()).total_seconds())
+        self.cpu["differenza_ora_s"] = diff
+        tolleranza = float(self.cfg.get("tolleranza_ora_s") or 60)
+        dati = {"ora_cpu": cpu["ora"], "ora_pc": adesso(), "differenza_s": diff}
+        if abs(diff) > tolleranza and not self.cpu["ora_errata"]:
+            self.sistema("ORA_CPU_ERRATA", "attenzione",
+                         f"Orologio della CPU {'avanti' if diff > 0 else 'indietro'} di {durata_testo(diff)} rispetto al "
+                         "registratore: le date degli eventi del PLC sono sbagliate", dati)
+            self.cpu["ora_errata"] = True
+            self.reg.set("ora_cpu_errata", True)
+        elif abs(diff) <= tolleranza / 2 and self.cpu["ora_errata"]:
+            self.sistema("ORA_CPU_OK", "info", "Orologio della CPU di nuovo allineato al registratore", dati)
+            self.cpu["ora_errata"] = False
+            self.reg.set("ora_cpu_errata", False)
+
+    def stato_cpu(self):
+        """Stato della CPU per la pagina web e il pannello: modo da snap7 e dati scritti dal FB."""
+        return dict(self.cpu, modo=self.cpu["modo"] if self.connesso else None,
+                    vita_ferma=self.vita_ferma >= self.cfg["vita_ferma_dopo_letture"],
+                    tolleranza_ora_s=self.cfg.get("tolleranza_ora_s"), **((self.stato or {}).get("cpu") or {}))
 
     # -------------------------------------------------------------- dati che arrivano dal pannello
     def riga_eth(self, r):
@@ -541,7 +686,7 @@ def crea_app(cfg, reg, srv):
         return {"macchina": cfg["macchina"], "matricola": cfg.get("matricola", ""), "sorgente": srv.src.descrizione(),
                 "connesso": srv.connesso, "ultima_lettura": srv.ultima_lettura, "stato": srv.stato,
                 "nomi_parametri": cfg["parametri"], "nomi_profinet": cfg["nomi_profinet"],
-                "nomi_ethernet": cfg["nomi_ethernet"], "macchina": srv.macchina()}
+                "nomi_ethernet": cfg["nomi_ethernet"], "macchina": srv.macchina(), "cpu": srv.stato_cpu()}
 
     @app.get("/api/collegamenti")
     def collegamenti():
@@ -614,7 +759,8 @@ def crea_app(cfg, reg, srv):
                 "rete": [{k: d[k] for k in ("ip", "nome", "mac", "online", "noto", "commento", "locale")} for d in elenco],
                 "esterni": sum(1 for d in elenco if not d["noto"]),
                 "noti_offline": sum(1 for d in elenco if d["noto"] and not d["online"]),
-                "accesso_cpu": bool(sl and sl.accesso_recente()), "commenti": srv.commenti()}
+                "accesso_cpu": bool(sl and sl.accesso_recente()), "commenti": srv.commenti(),
+                "cpu": {"modo": srv.stato_cpu()["modo"], "differenza_ora_s": srv.cpu["differenza_ora_s"]}}
 
     @app.post("/api/pannello/approva")
     def pannello_approva(token: str = Form(""), ip: str = Form(...), nome: str = Form("")):

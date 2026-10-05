@@ -1,10 +1,10 @@
-# Sigillo Base v2.0
+# Sigillo Base v2.1
 
 Rileva le modifiche al programma PLC, alla firma del programma di sicurezza e all'hardware (CPU
 sostituita o firmware aggiornato), registra apertura del quadro e modalità manutenzione, sorveglia
 16 parametri con limiti minimo/massimo, blocca l'avvio automatico finché le modifiche non vengono
 approvate e conserva tutto in un registro a prova di manomissione. Tiene sotto controllo i
-dispositivi della macchina e della rete.
+dispositivi della macchina e della rete e lo stato della CPU (RUN/STOP, tempo di ciclo, orologio, avvii).
 
 ```
 plc/           1_SigilloBase_Evento.udt, 2_DB_SigilloBase.db, 3_FC_SigilloBaseEvento.scl, 4_FB_SigilloBase.scl
@@ -21,8 +21,14 @@ registratore/  sigillo_base.py, collegamenti.py, static/ (pagina web e verificat
 | Elenco dei dispositivi Ethernet controllati dal pannello (IP, porta, nome) | memoria ritentiva del pannello (RW) |
 | Elenco della rete, IP, MAC, approvazioni, commenti, storico permanente | registratore |
 
-Il DB del PLC è sceso a **1822 byte**. Il registratore non scrive più nulla nel PLC: il pannello
-lo interroga direttamente via HTTP.
+Il DB del PLC è di **1856 byte** (1822 della v2.0 più 34 per lo stato della CPU). Il registratore non
+scrive nulla nel PLC: il pannello lo interroga direttamente via HTTP.
+
+> **Aggiornamento dalla v2.0:** reimporta DB e FB e ricarica il DB: la struttura `Cpu` si aggiunge in
+> fondo, ma un DB ad accesso standard non ha riserva di memoria, quindi il caricamento lo reinizializza
+> (il riferimento si azzera: riapprova il programma; il contatore degli avvii riparte da 1). Sul pannello
+> aggiungi `dbCpu` (e, se vuoi, `cpuAzzera`) nella Config e incolla il nuovo codice. Il registratore
+> v2.1 legge 1856 byte: aggiorna PLC e registratore insieme.
 
 > **Aggiornamento dalla v1.x:** reimporta DB e FB, ricarica il DB (il riferimento si azzera) e
 > riapprova il programma. Sul pannello cambiano la Config e il codice (vedi sotto). Nel tuo FB,
@@ -66,6 +72,10 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | Minimo / massimo / attivo parametro n | 1094 + 10(n−1) / +4 / +8.0 | Real / Real / Bool |
 | Valore attuale parametro n | 1254 + 4(n−1) | Real |
 | Rileggi nomi PROFINET | 1402.0 | Bool |
+| Tempo di ciclo attuale / minimo / massimo [ms] | 1822 / 1826 / 1830 | Real |
+| Ora della CPU | 1834 | DTL |
+| Numero di avvii / secondi dall'ultimo avvio | 1846 / 1850 | DInt |
+| Azzera minimo e massimo del ciclo | 1854.0 | Bool |
 
 ## 2. Pannello Weintek (JS Object, cMT-X)
 
@@ -82,10 +92,12 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | `dbEst` | `61094` | 135 |
 | `dbPn` | `61364` | 229 |
 | `ethStato` | `61396` | 3 |
+| `dbCpu` | `61822` | 17, facoltativo (scheda CPU) |
 | `ethMemoria` | **Local HMI**, `RW-1000` (registri ritentivi del pannello) | 192 |
 | `cmdApprova` | tag `DB_SigilloBase.Cmd.ImpostaRiferimento` | Bit |
 | `cmdSblocca` | tag `DB_SigilloBase.Cmd.SbloccaAvvio` | Bit |
 | `pnRileggi` | tag `DB_SigilloBase.PnCmd.Rileggi` | Bit, facoltativo |
+| `cpuAzzera` | tag `DB_SigilloBase.Cpu.AzzeraCiclo` | Bit, facoltativo |
 | `abilitaComandi` | bit interno, es. LB-9000 | facoltativo |
 
 `ethMemoria` occupa 192 parole a partire dall'indirizzo scelto (RW-1000..RW-1191): non usarle per
@@ -102,6 +114,9 @@ altro. Se un blocco lungo dà "cannot get data", dividilo: `dbPn` 62 + `dbPn2` (
   (senza commenti).
 - **Dispositivi → Rete**: elenco del registratore (IP, nome, MAC, stato, commento). Toccando un
   dispositivo non noto lo si approva; toccando un noto lo si commenta o se ne revoca l'approvazione.
+- **CPU**: RUN/STOP con la sua fonte, tempo di ciclo attuale, minimo e massimo (pulsante "Azzera
+  minimo e massimo" se c'è `cpuAzzera`), ora della CPU confrontata con quella del pannello, tempo
+  dall'ultimo avvio e numero di avvii. Vedi [Stato della CPU](#stato-della-cpu).
 
 Tutti i comandi richiedono `abilitaComandi` a 1.
 
@@ -123,6 +138,9 @@ In `config.json`:
 "rete": { "abilitato": true, "sottorete": "192.168.0.0/24", "periodo_s": 15,
           "noti": { "192.168.0.1": { "nome": "PLC", "mac": "" } } }
 ```
+
+`"tolleranza_ora_s": 60` è la differenza massima ammessa tra l'orologio della CPU e quello del PC del
+registratore.
 
 `pin_dispositivi` serve per approvare e commentare dalla pagina web; `token_pannello` deve essere
 uguale a `REGISTRATORE.token` nel JS Object.
@@ -166,13 +184,50 @@ così come sono. I messaggi che parlano di login, sessioni o connessioni accendo
 - Dopo la prova al banco mandami i messaggi ricevuti: affiniamo il riconoscimento degli accessi
   sul testo reale della tua CPU.
 
+## Stato della CPU
+
+Cosa si può sapere in modo affidabile:
+
+- **RUN o STOP**: il registratore lo legge direttamente dalla CPU con snap7. Il pannello lo deduce dal
+  contatore di vita, e lo riceve preciso dal registratore quando è attivo.
+- **Tempo di ciclo** attuale, minimo e massimo, misurato dal FB con l'istruzione `RUNTIME`.
+- **Ora della CPU**, confrontata con quella del pannello: se l'orologio è sbagliato, anche le date del
+  registro lo sono.
+- **Tempo dall'ultimo avvio** e **numero di avvii** della CPU.
+
+Dettagli:
+
+- **RUN/STOP dal registratore.** Il registratore legge il modo operativo dalla lista di stato della CPU
+  (SZL 0x0424) con `read_szl`. Non usa `get_cpu_state()`: con python-snap7 3.x restituisce sempre RUN
+  senza interrogare la CPU (lo usa solo come riserva con snap7 1.x/2.x). Registra "CPU in STOP" e
+  "CPU di nuovo in RUN". Se la CPU è in RUN ma il contatore di vita è fermo, registra "FB_SigilloBase
+  non in esecuzione (CPU in RUN)": il FB non viene chiamato.
+  **Da verificare al banco:** nella pagina web, alla voce "Modo (snap7)", compare il byte bzu-id letto
+  dalla CPU (08 = RUN). Metti la CPU in STOP e controlla che la pagina indichi STOP; se non succede,
+  mandami il valore del byte.
+- **RUN/STOP sul pannello.** Il contatore di vita che si muove vuol dire RUN. Il contatore fermo vuol dire
+  CPU in STOP *oppure* FB non chiamato: da solo il pannello non può distinguere i due casi, e lo
+  scrive. Con il registratore raggiungibile riceve il modo preciso. Se il contatore si muove, vale
+  RUN anche se il registratore riporta ancora STOP: il contatore è il dato più fresco.
+- **Tempo di ciclo.** `RUNTIME` misura il tempo tra due chiamate del FB, quindi il ciclo dell'OB che lo
+  chiama (OB1). Minimo e massimo valgono dall'ultimo avvio o dall'ultimo azzeramento; le prime due misure
+  dopo l'avvio si scartano.
+- **Ora.** Il FB copia a ogni ciclo l'ora locale della CPU (`RD_LOC_T`, la stessa usata per gli eventi).
+  Il pannello la confronta con il proprio orologio e il registratore con quello del PC; oltre i 60 s
+  (`tolleranza_ora_s`) segnalano "Orologio della CPU sbagliato". Il registratore annota l'evento una
+  volta e annota il ritorno nella norma sotto metà della tolleranza. In STOP l'ora nel DB è ferma e il
+  confronto si sospende.
+- **Avvii.** Il contatore sta nel DB a ritenzione e cresce a ogni avvio. Il numero compare anche
+  nell'evento 1 del registro ("avvio n. 12"). Il tempo dall'ultimo avvio è la somma dei tempi di ciclo:
+  non dipende dall'orologio della CPU.
+
 ### Cosa scrive il registratore nel PLC
 
 ## Eventi registrati
 
 | N. | Evento |
 | --- | --- |
-| 1 | Avvio o reinizializzazione del programma PLC |
+| 1 | Avvio o reinizializzazione del programma PLC (con il numero dell'avvio) |
 | 2 | Programma e hardware approvati |
 | 3 / 4 | Programma diverso dall'approvato / tornato uguale |
 | 5 | Firma F cambiata |
@@ -190,6 +245,7 @@ così come sono. I messaggi che parlano di login, sessioni o connessioni accendo
 | 26 | Nome PROFINET non leggibile |
 | registratore | Rete: dispositivi noti online/offline, non noti collegati/scollegati, MAC diverso, approvazioni, revoche |
 | registratore | Commenti, elenco Ethernet del pannello cambiato, token o PIN errati, Syslog della CPU |
+| registratore | CPU in STOP / di nuovo in RUN, FB non in esecuzione con CPU in RUN, orologio della CPU sbagliato / di nuovo allineato |
 
 ## Test
 
@@ -199,4 +255,4 @@ python -m pytest -q tests
 ```
 
 Il banco `tests/banco_jsobject.js` esegue il JS Object con Canvas, driver, memoria RW del pannello,
-dispositivi Ethernet e registratore HTTP simulati (31 scenari).
+dispositivi Ethernet e registratore HTTP simulati (41 scenari).

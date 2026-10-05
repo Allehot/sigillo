@@ -55,6 +55,11 @@
       <div class="fascia nd" id="fascia">Lettura in corso…</div>
       <dl id="inventario"></dl>
     </section>
+    <section aria-labelledby="t-cpu">
+      <h2 id="t-cpu">Stato della CPU</h2>
+      <div class="fascia nd" id="fascia-cpu">Lettura in corso…</div>
+      <dl id="dati-cpu"></dl>
+    </section>
     <section aria-labelledby="t-reg">
       <h2 id="t-reg">Integrità del registro</h2>
       <div class="timbro" id="timbro"><strong>…</strong><span>verifica in corso</span></div>
@@ -145,8 +150,39 @@ async function aggiornaStato() {
       <td>${esc(nomi[String(p.n)] || "Parametro " + p.n)}</td><td class="n">${p.valore}</td>
       <td class="n">${p.attivo ? p.min : "–"}</td><td class="n">${p.attivo ? p.max : "–"}</td></tr>`).join("")
       || '<tr><td colspan="5" class="tenue">Nessun dato.</td></tr>';
+    mostraCpu(s);
   } catch (e) { $("#conn").className = "conn no"; $("#conn").textContent = "Registratore non raggiungibile"; }
 }
+const ms = v => v === undefined || v === null ? "–" : (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " ms";
+function durata(sec) {
+  sec = Math.abs(Math.round(sec));
+  if (sec < 120) return sec + " s";
+  if (sec < 7200) return Math.floor(sec / 60) + " min";
+  if (sec < 172800) return Math.floor(sec / 3600) + " h " + Math.floor(sec % 3600 / 60) + " min";
+  return Math.floor(sec / 86400) + " g " + Math.floor(sec % 86400 / 3600) + " h";
+}
+function mostraCpu(s) {
+  const c = s.cpu || {}, f = $("#fascia-cpu"), d = c.differenza_ora_s;
+  if (!s.connesso) { f.className = "fascia ko"; f.textContent = "PLC non raggiungibile"; }
+  else if (c.modo === "STOP") { f.className = "fascia ko"; f.textContent = "CPU in STOP"; }
+  else if (c.modo === "RUN" && c.vita_ferma) { f.className = "fascia ko"; f.textContent = "CPU in RUN, ma FB_SigilloBase non è in esecuzione"; }
+  else if (!c.modo) { f.className = "fascia nd"; f.textContent = c.vita_ferma ? "CPU in STOP o FB_SigilloBase fermo (stato della CPU non leggibile)"
+                                                                               : "Stato della CPU non leggibile" + (c.errore_modo ? ": " + c.errore_modo : ""); }
+  else if (c.ora_errata) { f.className = "fascia nd"; f.textContent = "Orologio della CPU sbagliato: le date degli eventi del PLC non sono affidabili"; }
+  else { f.className = "fascia ok"; f.textContent = c.modo === "AVVIO" ? "CPU in avvio" : "CPU in RUN"; }
+  const fermo = c.modo === "STOP" || c.vita_ferma;   // in STOP il FB non aggiorna cicli, ora e tempo dall'avvio
+  $("#dati-cpu").innerHTML = (c.avvii === undefined ? [["Dati del FB", "non presenti: DB_SigilloBase della v2.0, aggiornalo alla v2.1"]] : [
+    ["Modo (snap7)", (c.modo || "non leggibile") + (c.szl_bzu ? " (bzu-id " + c.szl_bzu + ")" : "")],
+    ["Tempo di ciclo", fermo ? "– (FB fermo)" : ms(c.ciclo_ms)],
+    ["Ciclo minimo / massimo", ms(c.ciclo_min_ms) + " / " + ms(c.ciclo_max_ms)],
+    ["Ora della CPU", dataOra(c.ora) + (fermo ? " (ferma)" : "")],
+    ["Differenza dal PC", d === null || d === undefined || fermo ? "–" : d === 0 ? "nessuna"
+       : "CPU " + (d > 0 ? "avanti" : "indietro") + " di " + durata(d) + (c.ora_errata ? " (oltre " + c.tolleranza_ora_s + " s)" : "")],
+    ["Tempo dall'ultimo avvio", fermo ? "–" : durata(c.secondi_da_avvio)],
+    ["Numero di avvii", c.avvii]])
+    .map(([a, b]) => `<dt>${esc(a)}</dt><dd>${esc(b ?? "–")}</dd>`).join("");
+}
+
 async function aggiornaEventi() {
   try {
     const ev = await json("/api/eventi");

@@ -2,7 +2,7 @@ DATA_BLOCK "DB_SigilloBase"
 TITLE = 'Sigillo Base - dati di scambio con HMI e registratore'
 { S7_Optimized_Access := 'FALSE' }
 AUTHOR : SDM
-VERSION : 2.0
+VERSION : 2.1
 // - Accesso standard (NON ottimizzato) e a ritenzione.
 // - CPU: abilitare l'accesso PUT/GET.
 // Offset (byte):
@@ -10,10 +10,11 @@ VERSION : 2.0
 //   ChecksumRif 22, ChecksumAtt 30, VersioneProgetto 38, Eventi 70 (32 x 32 = 1024),
 //   Limiti 1094 (16 x 10), ParamAtt 1254 (16 x 4), Hw 1318, CpuFwAtt 1320, CpuFwRif 1324,
 //   CpuSerialeAtt 1328, CpuSerialeRif 1346, PnConfigurati 1364, PnPresenti 1380, EthMaschera 1396,
-//   EthOnline 1398, EthVita 1400, PnCmd 1402, PnNomi 1404 (16 x 26), PnNomiErrore 1820.
-//   Dimensione totale 1822 byte.
-// HMI: legge 0..69 (35 parole), 1094..1363 (135 parole), 1364..1821 (229 parole);
-//      scrive 1396..1401 (3 parole: EthMaschera, EthOnline, EthVita) e PnCmd.Rileggi.
+//   EthOnline 1398, EthVita 1400, PnCmd 1402, PnNomi 1404 (16 x 26), PnNomiErrore 1820,
+//   Cpu 1822 (CicloAtt 1822, CicloMin 1826, CicloMax 1830, Ora 1834, Avvii 1846, SecondiDaAvvio 1850,
+//   AzzeraCiclo 1854.0). Dimensione totale 1856 byte.
+// HMI: legge 0..69 (35 parole), 1094..1363 (135 parole), 1364..1821 (229 parole), 1822..1855 (17 parole);
+//      scrive 1396..1401 (3 parole: EthMaschera, EthOnline, EthVita), PnCmd.Rileggi e Cpu.AzzeraCiclo.
 // Elenco della rete, IP, MAC, approvazioni e commenti NON stanno nel PLC: li tiene il registratore.
 // L'elenco dei dispositivi Ethernet controllati dal pannello sta nella memoria del pannello.
    STRUCT
@@ -66,6 +67,16 @@ VERSION : 2.0
       END_STRUCT;
       PnNomi : Array[1..16] of String[24];   // 1404, 26 byte ciascuno: nome PROFINET letto con Get_Name ('' = non letto)
       PnNomiErrore : Array[1..16] of Bool;   // 1820  nome non leggibile
+      // ---- v2.1: stato della CPU (scritto dal FB) ----
+      Cpu : Struct                           // 1822
+         CicloAtt : Real;                    // 1822  tempo di ciclo attuale [ms], misurato con RUNTIME
+         CicloMin : Real;                    // 1826  minimo dall'avvio o dall'ultimo azzeramento [ms]
+         CicloMax : Real;                    // 1830  massimo dall'avvio o dall'ultimo azzeramento [ms]
+         Ora : DTL;                          // 1834  ora locale della CPU (RD_LOC_T), aggiornata a ogni ciclo
+         Avvii : DInt;                       // 1846  numero di avvii della CPU (a ritenzione)
+         SecondiDaAvvio : DInt;              // 1850  tempo dall'ultimo avvio [s] (somma dei tempi di ciclo)
+         AzzeraCiclo : Bool;                 // 1854.0  HMI: azzera minimo e massimo (azzerato dal FB)
+      END_STRUCT;
    END_STRUCT;
 
 BEGIN

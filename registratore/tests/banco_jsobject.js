@@ -1,4 +1,4 @@
-// Banco di prova del JS Object Sigillo Base v2.0: simula Canvas, MouseArea, driver Weintek,
+// Banco di prova del JS Object Sigillo Base v2.1: simula Canvas, MouseArea, driver Weintek,
 // la memoria RW del pannello, i dispositivi Ethernet e il registratore che risponde via HTTP.
 // Uso: node banco_jsobject.js <SigilloBase_JSObject.js> <db.bin>  -> JSON con l'esito degli scenari
 "use strict";
@@ -23,6 +23,9 @@ function memoriaEth(righe) {
 
 function crea(opz) {
   const db = Buffer.from(fs.readFileSync(fileDb));
+  const ora = new Date();                       // ora della CPU aggiornata dal FB (DTL al byte 1834)
+  db.writeUInt16BE(ora.getFullYear(), 1834);
+  [ora.getMonth() + 1, ora.getDate(), ora.getDay() + 1, ora.getHours(), ora.getMinutes(), ora.getSeconds()].forEach((x, i) => { db[1836 + i] = x; });
   if (opz.prepara) opz.prepara(db);
   let rw = opz.memoria ? memoriaEth(opz.memoria) : new Array(192).fill(0);
   const scritture = [], richieste = [];
@@ -37,7 +40,9 @@ function crea(opz) {
   }
   class MouseArea { on(e, f) { if (e === "click") click = f; } }
   const config = { dbStato: { byte: 0 }, dbEst: { byte: 1094 }, dbPn: { byte: 1364 }, ethStato: { word: 1396 },
-                   ethMemoria: { rw: true }, cmdApprova: { bit: 0 }, cmdSblocca: { bit: 1 }, pnRileggi: { bitAddr: 1402 } };
+                   ethMemoria: { rw: true }, cmdApprova: { bit: 0 }, cmdSblocca: { bit: 1 }, pnRileggi: { bitAddr: 1402 },
+                   dbCpu: { byte: 1822 }, cpuAzzera: { bitAddr: 1854 } };
+  if (opz.senzaCpu) { delete config.dbCpu; delete config.cpuAzzera; }
   if (opz.diviso) Object.assign(config, { dbPn2: { byte: 1488 }, dbPn3: { byte: 1612 }, dbPn4: { byte: 1736 }, dbEst2: { byte: 1218 }, dbEst3: { byte: 1342 } });
   if (opz.abilita !== undefined) config.abilitaComandi = { lb: true };
   const driver = { promises: {
@@ -215,5 +220,34 @@ function crea(opz) {
   v("guasto", o.testi().includes("dbStato (35 parole): cannot get data"));
   o = crea({ vitaFerma: true }); await pausa(20); await o.ciclo(6);
   v("vita_ferma", o.testi().includes("FB_SigilloBase non in esecuzione"));
+
+  // 8. stato della CPU: RUN dedotto dalla vita, tempi di ciclo, avvii, azzeramento
+  const pnOnline = db => { db[1380] |= 0b110; };
+  o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
+  await o.clicca("CPU");
+  t = o.testi();
+  v("cpu_run_dalla_vita", t.includes("RUN (dedotto dal contatore di vita)"));
+  v("cpu_ciclo_e_avvii", /\d\.\d ms/.test(t) && t.includes("Numero di avvii") && t.includes(" | 3 | ") && /CPU (allineata|indietro di 1 s)/.test(t));
+  await o.clicca("Azzera minimo e massimo");
+  v("cpu_azzera", (o.db[1854] & 1) === 1);
+  await o.clicca("Stato");
+  v("cpu_riga_stato", /RUN, ciclo \d/.test(o.testi()));
+  // RUN / STOP preciso dal registratore
+  o = crea({ vitaFerma: true, registratore: { cpu: { modo: "STOP" } } }); await pausa(30); await o.registratore(); await o.ciclo(6);
+  v("cpu_stop_dal_registratore", o.testi().includes("CPU in STOP") && !o.testi().includes("FB_SigilloBase non in esecuzione"));
+  o = crea({ vitaFerma: true, registratore: { cpu: { modo: "RUN" } } }); await pausa(30); await o.registratore(); await o.ciclo(6);
+  v("cpu_run_fb_fermo", o.testi().includes("La CPU è in RUN ma il contatore di vita è fermo"));
+  await o.clicca("CPU");
+  v("cpu_fb_fermo_scheda", o.testi().includes("RUN, ma FB_SigilloBase fermo (letto dal registratore)") && o.testi().includes("– (FB fermo)"));
+  // il contatore di vita e' piu' fresco del registratore: se si muove la CPU e' in RUN
+  o = crea({ prepara: pnOnline, registratore: { cpu: { modo: "STOP" } } }); await pausa(30); await o.registratore(); await o.ciclo(2);
+  v("cpu_vita_piu_fresca", !o.testi().includes("CPU in STOP"));
+  // orologio della CPU indietro di un'ora
+  o = crea({ prepara: db => { pnOnline(db); db[1834 + 5] = (db[1834 + 5] + 23) % 24; } }); await pausa(30); await o.ciclo(2);
+  v("cpu_ora_errata", o.testi().includes("Orologio della CPU sbagliato") && o.testi().includes("indietro di 60 min"));
+  // dbCpu non configurato: RUN/STOP resta, con la spiegazione
+  o = crea({ senzaCpu: true }); await pausa(20); await o.ciclo(2);
+  await o.clicca("CPU");
+  v("cpu_non_configurata", o.testi().includes("RUN (dedotto dal contatore di vita)") && o.testi().includes("non configurato"));
   console.log(JSON.stringify(e));
 })().catch(x => console.log(JSON.stringify({ eccezione: String(x.stack || x) })));
