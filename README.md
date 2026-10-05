@@ -1,4 +1,4 @@
-# Sigillo Base v2.1
+# Sigillo Base v2.2
 
 Rileva le modifiche al programma PLC, alla firma del programma di sicurezza e all'hardware (CPU
 sostituita o firmware aggiornato), registra apertura del quadro e modalità manutenzione, sorveglia
@@ -23,6 +23,11 @@ registratore/  sigillo_base.py, collegamenti.py, static/ (pagina web e verificat
 
 Il DB del PLC è di **1856 byte** (1822 della v2.0 più 34 per lo stato della CPU). Il registratore non
 scrive nulla nel PLC: il pannello lo interroga direttamente via HTTP.
+
+> **Aggiornamento dalla v2.1:** cambia solo il JS Object del pannello. PLC, DB e registratore restano
+> quelli della v2.1. Incolla il nuovo codice e, se vuoi la scheda **Registro**, aggiungi `dbEventi` nella
+> Config. Il pannello legge meno dal PLC e ridisegna lo schermo solo quando qualcosa cambia
+> (vedi [Carico sul pannello](#carico-sul-pannello)).
 
 > **Aggiornamento dalla v2.0:** reimporta DB e FB e ricarica il DB: la struttura `Cpu` si aggiunge in
 > fondo, ma un DB ad accesso standard non ha riserva di memoria, quindi il caricamento lo reinizializza
@@ -93,6 +98,7 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | `dbPn` | `61364` | 229 |
 | `ethStato` | `61396` | 3 |
 | `dbCpu` | `61822` | 17, facoltativo (scheda CPU) |
+| `dbEventi` | `60070` | 512, facoltativo (scheda Registro) |
 | `ethMemoria` | **Local HMI**, `RW-1000` (registri ritentivi del pannello) | 192 |
 | `cmdApprova` | tag `DB_SigilloBase.Cmd.ImpostaRiferimento` | Bit |
 | `cmdSblocca` | tag `DB_SigilloBase.Cmd.SbloccaAvvio` | Bit |
@@ -102,7 +108,8 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 
 `ethMemoria` occupa 192 parole a partire dall'indirizzo scelto (RW-1000..RW-1191): non usarle per
 altro. Se un blocco lungo dà "cannot get data", dividilo: `dbPn` 62 + `dbPn2` (`61488`, 62) +
-`dbPn3` (`61612`, 62) + `dbPn4` (`61736`, 43); `dbEst` 62 + `dbEst2` (`61218`, 62) + `dbEst3` (`61342`, 11).
+`dbPn3` (`61612`, 62) + `dbPn4` (`61736`, 43); `dbEst` 62 + `dbEst2` (`61218`, 62) + `dbEst3` (`61342`, 11);
+`dbEventi` 62 + `dbEventi2` (`60194`, 62) … `dbEventi8` (`60938`, 62) + `dbEventi9` (`61062`, 16).
 
 **Schede**
 - **Stato**: programma, firma F, CPU, quadro, manutenzione, avvio, riepilogo dei collegamenti.
@@ -117,6 +124,11 @@ altro. Se un blocco lungo dà "cannot get data", dividilo: `dbPn` 62 + `dbPn2` (
 - **CPU**: RUN/STOP con la sua fonte, tempo di ciclo attuale, minimo e massimo (pulsante "Azzera
   minimo e massimo" se c'è `cpuAzzera`), ora della CPU confrontata con quella del pannello, tempo
   dall'ultimo avvio e numero di avvii. Vedi [Stato della CPU](#stato-della-cpu).
+- **Registro**: gli ultimi 32 eventi del PLC (quelli del buffer `Eventi` nel DB), dal più recente, con
+  numero, data e ora della CPU e descrizione (nomi dei parametri, dei dispositivi PROFINET ed Ethernet).
+  Si sfoglia a pagine con "Più recenti" / "Meno recenti". Con un'altra scheda aperta, l'etichetta
+  mostra quanti eventi nuovi sono arrivati, es. "Registro (2)". Lo storico completo resta nel
+  registratore; la scheda funziona anche senza.
 
 Tutti i comandi richiedono `abilitaComandi` a 1.
 
@@ -223,6 +235,28 @@ Dettagli:
 
 ### Cosa scrive il registratore nel PLC
 
+## Carico sul pannello
+
+Il JS Object è scritto per pesare il meno possibile sul cMT-X:
+
+- **Ridisegno solo se serve.** A ogni lettura il pannello prepara l'elenco di quello che andrebbe
+  disegnato e lo confronta con quello già sullo schermo: se è uguale non tocca il Canvas. Le schede
+  Stato, Dispositivi e Registro, ferme, non si ridisegnano; CPU e Parametri si ridisegnano quando un
+  valore cambia. Per questo la riga "Stato della CPU" della scheda Stato non mostra più il tempo di
+  ciclo, che cambia a ogni lettura: è nella scheda CPU.
+- **Larghezze dei testi in memoria.** Le misure dei testi e i testi accorciati con "…" si calcolano una
+  volta sola.
+- **Letture ridotte.** Ogni secondo si leggono `dbStato` (35 parole) e i primi 20 word di `dbPn` (quali
+  dispositivi PROFINET sono configurati e presenti). `dbEst` si legge ogni secondo con le schede Stato e
+  Parametri aperte, `dbCpu` con la scheda CPU, `dbEventi` con la scheda Registro e solo quando arriva
+  un evento nuovo; tutto il resto ogni 10 s. Cambiando scheda il pannello rilegge subito tutto. Dopo
+  "Rileggi da TIA" i nomi PROFINET si rileggono ogni secondo per un minuto.
+
+| Al secondo, nel banco di prova | v2.1 | v2.2 |
+| --- | --- | --- |
+| Parole lette dal PLC, scheda Stato / Dispositivi / CPU | 416 / 416 / 416 | 213 / 91 / 106 |
+| Ridisegni del Canvas con la scheda ferma | 1 | 0 |
+
 ## Eventi registrati
 
 | N. | Evento |
@@ -255,4 +289,5 @@ python -m pytest -q tests
 ```
 
 Il banco `tests/banco_jsobject.js` esegue il JS Object con Canvas, driver, memoria RW del pannello,
-dispositivi Ethernet e registratore HTTP simulati (41 scenari).
+dispositivi Ethernet e registratore HTTP simulati (55 scenari, compresi il carico sul pannello e la
+scheda Registro).

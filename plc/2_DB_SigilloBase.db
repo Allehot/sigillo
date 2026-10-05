@@ -13,7 +13,8 @@ VERSION : 2.1
 //   EthOnline 1398, EthVita 1400, PnCmd 1402, PnNomi 1404 (16 x 26), PnNomiErrore 1820,
 //   Cpu 1822 (CicloAtt 1822, CicloMin 1826, CicloMax 1830, Ora 1834, Avvii 1846, SecondiDaAvvio 1850,
 //   AzzeraCiclo 1854.0). Dimensione totale 1856 byte.
-// HMI: legge 0..69 (35 parole), 1094..1363 (135 parole), 1364..1821 (229 parole), 1822..1855 (17 parole);
+// HMI: legge 0..69 (35 parole), 1094..1363 (135 parole), 1364..1821 (229 parole), 1822..1855 (17 parole),
+//      70..1093 (512 parole, solo con la scheda Registro aperta);
 //      scrive 1396..1401 (3 parole: EthMaschera, EthOnline, EthVita), PnCmd.Rileggi e Cpu.AzzeraCiclo.
 // Elenco della rete, IP, MAC, approvazioni e commenti NON stanno nel PLC: li tiene il registratore.
 // L'elenco dei dispositivi Ethernet controllati dal pannello sta nella memoria del pannello.

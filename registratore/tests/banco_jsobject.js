@@ -1,4 +1,4 @@
-// Banco di prova del JS Object Sigillo Base v2.1: simula Canvas, MouseArea, driver Weintek,
+// Banco di prova del JS Object Sigillo Base v2.2: simula Canvas, MouseArea, driver Weintek,
 // la memoria RW del pannello, i dispositivi Ethernet e il registratore che risponde via HTTP.
 // Uso: node banco_jsobject.js <SigilloBase_JSObject.js> <db.bin>  -> JSON con l'esito degli scenari
 "use strict";
@@ -21,6 +21,15 @@ function memoriaEth(righe) {
   return v;
 }
 
+// scrive un evento nel buffer del PLC (slot 0..31) e aggiorna SeqUltimo, come FC_SigilloBaseEvento
+function evento(db, slot, seq, tipo, indice = 0, prima = 0, dopo = 0, extra = 0) {
+  const o = 70 + slot * 32;
+  db.writeInt16BE(tipo, o + 4); db.writeInt16BE(indice, o + 6);
+  db.writeUInt16BE(2026, o + 8); [10, 5, 1, 14, 30, seq % 60].forEach((x, i) => { db[o + 10 + i] = x; });
+  db.writeUInt32BE(extra, o + 20); db.writeFloatBE(prima, o + 24); db.writeFloatBE(dopo, o + 28);
+  db.writeInt32BE(seq, o); db.writeInt32BE(seq, 4); db.writeInt16BE((slot + 1) % 32, 8);
+}
+
 function crea(opz) {
   const db = Buffer.from(fs.readFileSync(fileDb));
   const ora = new Date();                       // ora della CPU aggiornata dal FB (DTL al byte 1834)
@@ -30,20 +39,23 @@ function crea(opz) {
   let rw = opz.memoria ? memoriaEth(opz.memoria) : new Array(192).fill(0);
   const scritture = [], richieste = [];
   let testi = [], click = null;
+  const conta = { disegni: 0, testi: 0, misure: 0, parole: 0 };   // lavoro del pannello (prestazioni)
   const timer = [];
   class Canvas {
     constructor() { this.width = W; this.height = H; this.font = "13px Arial"; this.textAlign = "left"; }
-    fillRect(x, y, w, h) { if (!x && !y && w === W && h === H && !/rgba/.test(this.fillStyle)) testi = []; }
+    fillRect(x, y, w, h) { if (!x && !y && w === W && h === H && !/rgba/.test(this.fillStyle)) { testi = []; conta.disegni++; } }
     strokeRect() {}
-    measureText(t) { return { width: t.length * parseInt(/(\d+)px/.exec(this.font)[1], 10) * 0.55 }; }
-    fillText(t, x, y) { const w = this.measureText(t).width; const x0 = this.textAlign === "center" ? x - w / 2 : x; testi.push({ t: String(t), x: x0 + w / 2, y }); }
+    measureText(t) { conta.misure++; return { width: t.length * parseInt(/(\d+)px/.exec(this.font)[1], 10) * 0.55 }; }
+    fillText(t, x, y) { conta.testi++; const w = this.measureText(t).width; const x0 = this.textAlign === "center" ? x - w / 2 : x; testi.push({ t: String(t), x: x0 + w / 2, y }); }
   }
   class MouseArea { on(e, f) { if (e === "click") click = f; } }
   const config = { dbStato: { byte: 0 }, dbEst: { byte: 1094 }, dbPn: { byte: 1364 }, ethStato: { word: 1396 },
                    ethMemoria: { rw: true }, cmdApprova: { bit: 0 }, cmdSblocca: { bit: 1 }, pnRileggi: { bitAddr: 1402 },
-                   dbCpu: { byte: 1822 }, cpuAzzera: { bitAddr: 1854 } };
+                   dbCpu: { byte: 1822 }, cpuAzzera: { bitAddr: 1854 }, dbEventi: { byte: 70 } };
   if (opz.senzaCpu) { delete config.dbCpu; delete config.cpuAzzera; }
+  if (opz.senzaEventi) delete config.dbEventi;
   if (opz.diviso) Object.assign(config, { dbPn2: { byte: 1488 }, dbPn3: { byte: 1612 }, dbPn4: { byte: 1736 }, dbEst2: { byte: 1218 }, dbEst3: { byte: 1342 } });
+  if (opz.diviso) for (let k = 2; k <= 9; k++) config["dbEventi" + k] = { byte: 70 + (k - 1) * 124 };
   if (opz.abilita !== undefined) config.abilitaComandi = { lb: true };
   const driver = { promises: {
     async getData(a, n) {
@@ -51,6 +63,7 @@ function crea(opz) {
       if (opz.diviso && n > 62) throw new Error("cannot get data");
       if (a.lb) return { values: [opz.abilita ? 1 : 0] };
       if (a.rw) return { values: rw.slice(0, n) };
+      conta.parole += n;
       if (!opz.vitaFerma && a.byte === 0) db.writeInt32BE(db.readInt32BE(0) + 1, 0);
       const v = []; for (let i = 0; i < n; i++) v.push(db.readUInt16BE(a.byte + 2 * i)); return { values: v };
     },
@@ -102,7 +115,7 @@ function crea(opz) {
   new Function("driver", "Canvas", "MouseArea", "setInterval", "net", codice)
     .call({ widget: { add() {} }, config }, driver, Canvas, MouseArea, f => { timer.push(f); }, net);
   return {
-    db, scritture, richieste, statoReg, rw: () => rw, testi: () => testi.map(x => x.t).join(" | "),
+    db, scritture, richieste, statoReg, conta, rw: () => rw, testi: () => testi.map(x => x.t).join(" | "),
     async ciclo(n = 1) { for (let i = 0; i < n; i++) { timer[0](); await pausa(5); } },
     async sonda(n = 1) { for (let i = 0; i < n; i++) { timer[1](); await pausa(15); } },
     async registratore() { timer[2](); await pausa(15); },
@@ -231,7 +244,7 @@ function crea(opz) {
   await o.clicca("Azzera minimo e massimo");
   v("cpu_azzera", (o.db[1854] & 1) === 1);
   await o.clicca("Stato");
-  v("cpu_riga_stato", /RUN, ciclo \d/.test(o.testi()));
+  v("cpu_riga_stato", o.testi().includes("Stato della CPU | RUN") && !/ciclo \d/.test(o.testi()));
   // RUN / STOP preciso dal registratore
   o = crea({ vitaFerma: true, registratore: { cpu: { modo: "STOP" } } }); await pausa(30); await o.registratore(); await o.ciclo(6);
   v("cpu_stop_dal_registratore", o.testi().includes("CPU in STOP") && !o.testi().includes("FB_SigilloBase non in esecuzione"));
@@ -249,5 +262,46 @@ function crea(opz) {
   o = crea({ senzaCpu: true }); await pausa(20); await o.ciclo(2);
   await o.clicca("CPU");
   v("cpu_non_configurata", o.testi().includes("RUN (dedotto dal contatore di vita)") && o.testi().includes("non configurato"));
+
+  // 9. scheda Registro: eventi del PLC, nuovi eventi, pagine
+  o = crea({ prepara: db => { pnOnline(db); evento(db, 2, 3, 14, 1, 10, 12.5); evento(db, 3, 4, 18, 1); evento(db, 4, 5, 15, 2, 80, 130);
+                              evento(db, 5, 6, 20, 1); } });
+  await pausa(20); await o.ciclo(2);
+  v("registro_non_letto_fuori_scheda", o.conta.parole < 3 * 416);
+  await o.clicca("Registro");
+  t = o.testi();
+  v("registro_eventi", t.includes("Avvio del programma PLC (avvio n. 3)") && t.includes("Programma e hardware approvati")
+    && t.includes("Velocità rulliera ingresso [m/min]: 10 -> 12.5") && t.includes("PROFINET sew-movimot-1 offline")
+    && t.includes("Override massimo robot [%]: 130 fuori limite rifiutato, resta 80") && t.includes("Ethernet riga 1 offline"));
+  v("registro_ordine", t.indexOf("Ethernet riga 1 offline") < t.indexOf("Avvio del programma PLC"));
+  v("registro_data", t.includes("05/10/2026 14:30:"));
+  await o.clicca("Stato");
+  evento(o.db, 6, 7, 10); evento(o.db, 7, 8, 11); await o.ciclo();
+  v("registro_nuovi", o.testi().includes("Registro (2)"));
+  await o.clicca("Registro (2)");
+  v("registro_aggiornato", o.testi().includes("Quadro chiuso") && o.testi().includes("Quadro aperto") && !o.testi().includes("Registro (2)"));
+  for (let i = 8; i < 40; i++) evento(o.db, i % 32, i + 1, 12 + i % 2);
+  await o.ciclo();
+  v("registro_pagine", o.testi().includes("Pagina 1 di 4.") && o.testi().includes(" | 40 | "));
+  await o.clicca("Meno recenti");
+  v("registro_pagina_2", o.testi().includes("Pagina 2 di 4.") && !o.testi().includes(" | 40 | "));
+  o = crea({ diviso: true, prepara: db => evento(db, 2, 3, 6) }); await pausa(20); await o.ciclo();
+  await o.clicca("Registro");
+  v("registro_diviso", o.testi().includes("Avvio automatico bloccato"));
+  o = crea({ senzaEventi: true }); await pausa(20); await o.ciclo();
+  await o.clicca("Registro");
+  v("registro_non_configurato", o.testi().includes("Campo dbEventi non configurato"));
+
+  // 10. carico del pannello: letture ridotte e nessun ridisegno se nulla cambia
+  o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
+  await o.clicca("Dispositivi");
+  let c0 = Object.assign({}, o.conta); await o.ciclo(20);
+  v("carico_letture", (o.conta.parole - c0.parole) / 20 < 100);
+  v("carico_nessun_ridisegno", o.conta.disegni === c0.disegni && o.conta.testi === c0.testi);
+  o.db.write("\u0000\u0000nastro-nuovo", 1404, "latin1"); o.db[1404] = 24; o.db[1405] = 12; await o.ciclo(10);
+  v("carico_nomi_aggiornati", o.testi().includes("nastro-nuovo"));
+  await o.clicca("Parametri");
+  o.db.writeFloatBE(42.5, 1254); await o.ciclo();
+  v("carico_parametri_ogni_secondo", o.testi().includes("42.5"));
   console.log(JSON.stringify(e));
 })().catch(x => console.log(JSON.stringify({ eccezione: String(x.stack || x) })));
