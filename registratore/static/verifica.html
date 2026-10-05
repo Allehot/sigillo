@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sigillo – verifica di una copia del registro</title>
+<style>
+  :root { --fondo: #E8ECEF; --pannello: #F8FAFB; --inchiostro: #15212B; --tenue: #56646F; --riga: #C9D1D8;
+          --petrolio: #0A5F63; --ok: #1D7446; --allarme: #B3261E; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fondo); color: var(--inchiostro); font: 15px/1.5 "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 20px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+  .tenue { color: var(--tenue); font-size: 14px; }
+  section { background: var(--pannello); border: 1px solid var(--riga); border-radius: 6px; padding: 20px; margin-top: 18px; }
+  label { display: grid; gap: 6px; margin-bottom: 14px; font-size: 14px; color: var(--tenue); }
+  input[type=file] { font: inherit; }
+  button { font: inherit; padding: 9px 16px; border-radius: 4px; border: 1px solid var(--petrolio); background: var(--petrolio); color: #fff; cursor: pointer; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #7FB3B6; outline-offset: 2px; }
+  .esito { margin-top: 18px; padding: 16px; border-radius: 6px; font-weight: 600; }
+  .esito.ok { background: #E3F0E8; color: var(--ok); }
+  .esito.ko { background: #F6E1DF; color: var(--allarme); }
+  ul { margin: 8px 0 0; padding-left: 20px; font-weight: 400; color: var(--inchiostro); }
+  code { font-size: 12px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Verifica di una copia del registro Sigillo</h1>
+  <p class="tenue">Questa pagina funziona anche senza rete: ricalcola la catena di hash SHA-256 della copia esportata e la confronta con il file "ancora". Nessun dato lascia questo computer.</p>
+
+  <section>
+    <label>Copia del registro (file <code>sigillo_copia_….jsonl</code>)
+      <input type="file" id="copia" accept=".jsonl,.json,.txt"></label>
+    <label>File ancora della stessa esportazione (<code>sigillo_ancora_….json</code>, facoltativo ma consigliato)
+      <input type="file" id="ancora" accept=".json"></label>
+    <button id="verifica">Verifica</button>
+    <div id="esito" role="status"></div>
+  </section>
+
+  <section>
+    <p><strong>Come funziona.</strong> Ogni voce del registro contiene l'impronta della voce precedente. Se una riga viene modificata, aggiunta in mezzo o cancellata, le impronte successive non tornano più. Il file ancora, salvato separatamente al momento dell'esportazione, contiene l'impronta finale e il numero di voci: serve a scoprire anche le righe tolte in fondo.</p>
+    <p class="tenue">Formato dell'impronta: SHA-256 di <code>hash_prec|ts_reg|ts_plc|fonte|tipo|seq_plc|descrizione|dati</code>, partendo da 64 zeri.</p>
+  </section>
+</main>
+
+<script>
+// SHA-256 in JavaScript puro: funziona anche aprendo il file direttamente dal disco.
+function sha256(testo) {
+  const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,
+    0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,
+    0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,
+    0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,
+    0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  const H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const b = new TextEncoder().encode(testo);
+  const l = b.length, n = ((l + 9 + 63) >> 6) << 6, m = new Uint8Array(n);
+  m.set(b); m[l] = 0x80;
+  const dv = new DataView(m.buffer);
+  dv.setUint32(n - 4, (l * 8) >>> 0); dv.setUint32(n - 8, Math.floor(l / 0x20000000));
+  const w = new Uint32Array(64), r = (x, s) => (x >>> s) | (x << (32 - s));
+  for (let o = 0; o < n; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = r(w[i-15], 7) ^ r(w[i-15], 18) ^ (w[i-15] >>> 3), s1 = r(w[i-2], 17) ^ r(w[i-2], 19) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+    }
+    let [a, bb, c, d, e, f, g, h] = H;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (h + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0;
+      const t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + ((a & bb) ^ (a & c) ^ (bb & c))) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = bb; bb = a; a = (t1 + t2) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + bb) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+  }
+  return H.map(x => x.toString(16).padStart(8, "0")).join("");
+}
+
+// Stessa regola del registratore Python: None e 0 in seq_plc diventano stringa vuota.
+function impronta(prec, v) {
+  const seq = v.seq_plc ? String(v.seq_plc) : "";
+  return sha256([prec, v.ts_reg, v.ts_plc || "", v.fonte, v.tipo, seq, v.descrizione, v.dati].join("|"));
+}
+
+const leggi = f => new Promise((ok, ko) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = ko; r.readAsText(f, "utf-8"); });
+const esc = t => String(t).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+document.getElementById("verifica").addEventListener("click", async () => {
+  const out = document.getElementById("esito");
+  const fc = document.getElementById("copia").files[0], fa = document.getElementById("ancora").files[0];
+  if (!fc) { out.className = "esito ko"; out.textContent = "Selezionare prima il file della copia."; return; }
+  const problemi = [];
+  let voci = [];
+  try {
+    voci = (await leggi(fc)).split(/\r?\n/).filter(x => x.trim()).map(JSON.parse);
+  } catch (e) {
+    out.className = "esito ko"; out.textContent = "Il file della copia non è leggibile: " + e.message; return;
+  }
+  let prec = "0".repeat(64);
+  for (const v of voci) {
+    if (v.hash_prec !== prec) { problemi.push(`Voce ${v.id}: non collegata alla voce precedente (riga tolta o inserita).`); break; }
+    const atteso = impronta(prec, v);
+    if (atteso !== v.hash) { problemi.push(`Voce ${v.id}: contenuto modificato dopo la registrazione.`); break; }
+    prec = v.hash;
+  }
+  let ancoraTesto = "";
+  if (fa && !problemi.length) {
+    try {
+      const a = JSON.parse(await leggi(fa));
+      if (a.voci !== voci.length) problemi.push(`Il file ancora indica ${a.voci} voci, la copia ne contiene ${voci.length}.`);
+      else if (a.ultimo_hash !== prec) problemi.push("L'impronta finale non corrisponde al file ancora.");
+      else ancoraTesto = ` Corrisponde al file ancora del ${esc(a.data)}.`;
+    } catch (e) { problemi.push("Il file ancora non è leggibile."); }
+  }
+  if (problemi.length) {
+    out.className = "esito ko";
+    out.innerHTML = "Registro alterato o incompleto.<ul>" + problemi.map(p => `<li>${esc(p)}</li>`).join("") + "</ul>";
+  } else {
+    out.className = "esito ok";
+    out.innerHTML = `Registro integro: ${voci.length} voci verificate.${ancoraTesto}` +
+      (fa ? "" : "<ul><li>Senza il file ancora non si possono escludere righe tolte in fondo.</li></ul>") +
+      `<ul><li>Impronta finale: <code>${esc(prec)}</code></li></ul>`;
+  }
+});
+</script>
+</body>
+</html>

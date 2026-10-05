@@ -1,0 +1,73 @@
+{
+  "macchina": "Macchina di prova",
+  "matricola": "",
+  "plc": {
+    "ip": "192.168.214.200",
+    "rack": 0,
+    "slot": 1,
+    "db": 6
+  },
+  "periodo_lettura_s": 2.0,
+  "registro": "registro_sigillo_base.db",
+  "cartella_copie": "copie",
+  "copia_ogni_ore": 24,
+  "web": {
+    "host": "0.0.0.0",
+    "porta": 8150
+  },
+  "parametri": {
+    "1": "Velocita' rulliera ingresso [m/min]",
+    "2": "Override massimo robot [%]",
+    "3": "Quota prelievo [mm]",
+    "4": "Tempo muting barriera [ms]",
+    "5": "Parametro 5",
+    "6": "Parametro 6",
+    "7": "Parametro 7",
+    "8": "Parametro 8",
+    "9": "Parametro 9",
+    "10": "Parametro 10",
+    "11": "Parametro 11",
+    "12": "Parametro 12",
+    "13": "Parametro 13",
+    "14": "Parametro 14",
+    "15": "Parametro 15",
+    "16": "Parametro 16"
+  },
+  "rete": {
+    "abilitato": true,
+    "sottorete": "192.168.214.0/24",
+    "periodo_s": 15,
+    "noti": {
+      "192.168.214.200": {
+        "nome": "PLC",
+        "mac": ""
+      },
+      "192.168.214.2": {
+        "nome": "Pannello Weintek",
+        "mac": ""
+      },
+      "192.168.0.254": {
+        "nome": "Router teleassistenza",
+        "mac": ""
+      }
+    }
+  },
+  "syslog": {
+    "abilitato": true,
+    "porta": 514,
+    "sorgenti": [
+      "192.168.214.200"
+    ],
+    "accesso_minuti": 5
+  },
+  "pin_dispositivi": "cambiami",
+  "nomi_profinet": {
+    "1": "Azionamento SEW",
+    "2": "Master IO-Link"
+  },
+  "nomi_ethernet": {
+    "1": "Telecamera",
+    "2": "Router VPN"
+  },
+  "token_pannello": "cambia-questa-chiave"
+}

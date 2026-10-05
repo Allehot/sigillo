@@ -1,0 +1,73 @@
+DATA_BLOCK "DB_SigilloBase"
+TITLE = 'Sigillo Base - dati di scambio con HMI e registratore'
+{ S7_Optimized_Access := 'FALSE' }
+AUTHOR : SDM
+VERSION : 2.0
+// - Accesso standard (NON ottimizzato) e a ritenzione.
+// - CPU: abilitare l'accesso PUT/GET.
+// Offset (byte):
+//   Vita 0, SeqUltimo 4, IdxScrittura 8, Cmd 10, Stato 12, FirmaFRif 14, FirmaFAtt 18,
+//   ChecksumRif 22, ChecksumAtt 30, VersioneProgetto 38, Eventi 70 (32 x 32 = 1024),
+//   Limiti 1094 (16 x 10), ParamAtt 1254 (16 x 4), Hw 1318, CpuFwAtt 1320, CpuFwRif 1324,
+//   CpuSerialeAtt 1328, CpuSerialeRif 1346, PnConfigurati 1364, PnPresenti 1380, EthMaschera 1396,
+//   EthOnline 1398, EthVita 1400, PnCmd 1402, PnNomi 1404 (16 x 26), PnNomiErrore 1820.
+//   Dimensione totale 1822 byte.
+// HMI: legge 0..69 (35 parole), 1094..1363 (135 parole), 1364..1821 (229 parole);
+//      scrive 1396..1401 (3 parole: EthMaschera, EthOnline, EthVita) e PnCmd.Rileggi.
+// Elenco della rete, IP, MAC, approvazioni e commenti NON stanno nel PLC: li tiene il registratore.
+// L'elenco dei dispositivi Ethernet controllati dal pannello sta nella memoria del pannello.
+   STRUCT
+      Vita : DInt;
+      SeqUltimo : DInt;
+      IdxScrittura : Int;
+      Cmd : Struct
+         ImpostaRiferimento : Bool;        // 10.0  HMI: approva programma e hardware attuali
+         SbloccaAvvio : Bool;              // 10.1  HMI: consente il riavvio dopo una modifica
+         RichiediLettura : Bool;           // 10.2  forza una lettura immediata
+      END_STRUCT;
+      Stato : Struct
+         RiferimentoValido : Bool;         // 12.0
+         ChecksumOk : Bool;                // 12.1
+         FirmaFOk : Bool;                  // 12.2
+         AvvioBloccato : Bool;             // 12.3
+         ErroreLettura : Bool;             // 12.4
+         HwOk : Bool;                      // 12.5  firmware e seriale CPU uguali agli approvati
+      END_STRUCT;
+      FirmaFRif : DWord;
+      FirmaFAtt : DWord;
+      ChecksumRif : Array[0..7] of Byte;
+      ChecksumAtt : Array[0..7] of Byte;
+      VersioneProgetto : String[30] := 'COMMESSA-V1.0';
+      Eventi : Array[0..31] of "SigilloBase_Evento";
+      // ---- v1.1: parametri e hardware ----
+      Limiti : Array[1..16] of Struct      // limiti dalla valutazione dei rischi
+         Min : Real;
+         Max : Real;
+         Attivo : Bool;
+      END_STRUCT;
+      ParamAtt : Array[1..16] of Real;     // copia dei valori attuali (per HMI e registratore)
+      Hw : Struct
+         QuadroAperto : Bool;              // 1318.0
+         ChiaveManutenzione : Bool;        // 1318.1
+         ErroreIM : Bool;                  // 1318.2  lettura firmware/seriale non riuscita
+      END_STRUCT;
+      CpuFwAtt : DWord;                    // revisione firmware CPU ('V', x, y, z)
+      CpuFwRif : DWord;                    // firmware approvato
+      CpuSerialeAtt : String[16];
+      CpuSerialeRif : String[16];
+      // ---- dispositivi della macchina (solo quanto serve al PLC) ----
+      PnConfigurati : Array[0..15] of Byte;  // 1364  bit n = dispositivo PROFINET n configurato (DeviceStates MODE 1)
+      PnPresenti : Array[0..15] of Byte;     // 1380  bit n = dispositivo PROFINET n presente (DeviceStates MODE 4)
+      EthMaschera : Word;                    // 1396  scritto dall'HMI: bit r-1 = riga Ethernet r controllata
+      EthOnline : Word;                      // 1398  scritto dall'HMI: bit r-1 = riga Ethernet r online
+      EthVita : Int;                         // 1400  scritto dall'HMI: contatore dei controlli del pannello
+      PnCmd : Struct                         // 1402
+         Rileggi : Bool;                     // 1402.0  HMI: rilegge i nomi PROFINET (azzerato dal FB)
+      END_STRUCT;
+      PnNomi : Array[1..16] of String[24];   // 1404, 26 byte ciascuno: nome PROFINET letto con Get_Name ('' = non letto)
+      PnNomiErrore : Array[1..16] of Bool;   // 1820  nome non leggibile
+   END_STRUCT;
+
+BEGIN
+
+END_DATA_BLOCK

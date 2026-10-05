@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sigillo Base</title>
+<style>
+  :root { --fondo: #E8ECEF; --pannello: #F8FAFB; --inchiostro: #15212B; --tenue: #56646F; --riga: #C9D1D8;
+          --petrolio: #0A5F63; --ok: #1D7446; --allarme: #B3261E; --attenzione: #9A5B00; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fondo); color: var(--inchiostro); font: 15px/1.45 "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: baseline;
+           padding: 18px 24px; background: var(--pannello); border-bottom: 1px solid var(--riga); }
+  h1 { margin: 0; font-size: 21px; } h2 { margin: 0 0 12px; font-size: 16px; }
+  .tenue { color: var(--tenue); font-size: 13px; }
+  .conn { font-size: 13px; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--riga); }
+  .conn.si { color: var(--ok); border-color: var(--ok); } .conn.no { color: var(--allarme); border-color: var(--allarme); }
+  main { display: grid; grid-template-columns: 330px 1fr; gap: 20px; padding: 20px 24px; max-width: 1400px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 14px; } }
+  section { background: var(--pannello); border: 1px solid var(--riga); border-radius: 6px; padding: 18px; }
+  .fascia { padding: 12px 14px; border-radius: 4px; font-weight: 600; margin-bottom: 14px; border-left: 5px solid; }
+  .fascia.ok { background: #E3F0E8; color: var(--ok); } .fascia.ko { background: #F6E1DF; color: var(--allarme); }
+  .fascia.nd { background: #FBEFD9; color: var(--attenzione); }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; }
+  dt { color: var(--tenue); } dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .timbro { width: 150px; height: 150px; margin: 6px auto 12px; border-radius: 50%; display: grid; place-content: center;
+            text-align: center; border: 3px solid currentColor; box-shadow: inset 0 0 0 5px var(--pannello), inset 0 0 0 7px currentColor;
+            color: var(--tenue); transform: rotate(-6deg); }
+  .timbro.integro { color: var(--ok); } .timbro.alterato { color: var(--allarme); }
+  .timbro strong { display: block; font-size: 21px; } .timbro span { font-size: 12px; }
+  .azioni { display: grid; gap: 8px; margin-top: 12px; }
+  td button { padding: 4px 10px; font-size: 13px; }
+  button, .bottone { font: inherit; font-size: 14px; padding: 9px 14px; border-radius: 4px; cursor: pointer; text-align: center;
+                     border: 1px solid var(--petrolio); background: var(--pannello); color: var(--petrolio); text-decoration: none; }
+  button.primario { background: var(--petrolio); color: #fff; }
+  button:focus-visible, .bottone:focus-visible { outline: 3px solid #7FB3B6; outline-offset: 2px; }
+  .tabella { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--tenue); padding: 7px; border-bottom: 1px solid var(--riga); }
+  td { padding: 7px; border-bottom: 1px solid #E1E6EA; vertical-align: top; }
+  td.n { color: var(--tenue); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr.allarme td:first-child { box-shadow: inset 4px 0 0 var(--allarme); } tr.allarme .d { color: var(--allarme); font-weight: 600; }
+  tr.attenzione td:first-child { box-shadow: inset 4px 0 0 var(--attenzione); }
+  #esito { font-size: 13px; color: var(--tenue); text-align: center; min-height: 2.4em; margin: 0; }
+</style>
+</head>
+<body>
+<header>
+  <div><h1 id="macchina">Sigillo Base</h1><div class="tenue" id="sorgente">Registro delle modifiche software</div></div>
+  <div class="conn" id="conn" role="status">In attesa dei dati</div>
+</header>
+<main>
+  <div style="display:grid; gap:20px; align-content:start">
+    <section aria-labelledby="t-stato">
+      <h2 id="t-stato">Stato del programma</h2>
+      <div class="fascia nd" id="fascia">Lettura in corso…</div>
+      <dl id="inventario"></dl>
+    </section>
+    <section aria-labelledby="t-reg">
+      <h2 id="t-reg">Integrità del registro</h2>
+      <div class="timbro" id="timbro"><strong>…</strong><span>verifica in corso</span></div>
+      <p id="esito"></p>
+      <div class="azioni">
+        <button class="primario" id="btn-verifica">Verifica il registro</button>
+        <a class="bottone" href="/api/report.pdf">Scarica il report PDF</a>
+        <button id="btn-esporta">Salva una copia di sicurezza</button>
+        <a class="bottone" href="/verifica">Verifica una copia esportata</a>
+      </div>
+    </section>
+  </div>
+  <div style="display:grid; gap:20px; align-content:start">
+  <section aria-labelledby="t-coll">
+    <h2 id="t-coll">Collegamenti alla macchina</h2>
+    <div class="fascia nd" id="fascia-coll">Lettura in corso…</div>
+    <div class="tabella"><table>
+      <thead><tr><th>Indirizzo IP</th><th>Nome</th><th>MAC</th><th>Stato</th><th>Dal</th><th>Commento</th><th></th></tr></thead>
+      <tbody id="righe-rete"><tr><td colspan="7" class="tenue">Caricamento…</td></tr></tbody>
+    </table></div>
+    <p class="tenue" id="esito-disp" role="status" style="margin:8px 0 0"></p>
+    <p class="tenue" id="diag-rete" style="margin:4px 0 0; font-size:12px"></p>
+    <h3 style="font-size:14px; margin:16px 0 8px">Dispositivi della macchina (PLC e pannello)</h3>
+    <div class="tabella"><table>
+      <thead><tr><th>Tipo</th><th>Nome</th><th>Indirizzo</th><th>Stato</th><th>Commento</th><th></th></tr></thead>
+      <tbody id="righe-macchina"><tr><td colspan="4" class="tenue">Caricamento…</td></tr></tbody>
+    </table></div>
+    <p class="tenue" id="info-syslog" style="margin:12px 0 0"></p>
+  </section>
+  <section aria-labelledby="t-par">
+    <h2 id="t-par">Parametri impostabili</h2>
+    <div class="tabella"><table>
+      <thead><tr><th>N.</th><th>Parametro</th><th>Valore</th><th>Minimo</th><th>Massimo</th></tr></thead>
+      <tbody id="righe-par"><tr><td colspan="5" class="tenue">Caricamento…</td></tr></tbody>
+    </table></div>
+  </section>
+  <section aria-labelledby="t-eventi">
+    <h2 id="t-eventi">Eventi registrati</h2>
+    <div class="tabella"><table>
+      <thead><tr><th>N.</th><th>Data e ora</th><th>Evento</th><th>Fonte</th></tr></thead>
+      <tbody id="righe"><tr><td colspan="4" class="tenue">Caricamento…</td></tr></tbody>
+    </table></div>
+  </section>
+  </div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const dataOra = s => s ? s.slice(0, 19).replace("T", " ") : "";
+async function json(u, o) { const r = await fetch(u, o); if (!r.ok) throw new Error(r.status); return r.json(); }
+
+async function aggiornaStato() {
+  try {
+    const s = await json("/api/stato"), st = s.stato || {};
+    $("#macchina").textContent = s.macchina + (s.matricola ? " – " + s.matricola : "");
+    $("#sorgente").textContent = "Registro delle modifiche software. Fonte: " + s.sorgente;
+    $("#conn").className = "conn " + (s.connesso ? "si" : "no");
+    $("#conn").textContent = s.connesso ? "PLC collegato, ultima lettura " + dataOra(s.ultima_lettura).slice(11)
+                                        : s.connesso === false ? "PLC non raggiungibile" : "In attesa del PLC";
+    const f = $("#fascia");
+    if (!s.connesso) { f.className = "fascia ko"; f.textContent = "PLC non raggiungibile"; }
+    else if (st.avvio_bloccato) { f.className = "fascia ko"; f.textContent = "Avvio automatico bloccato: programma da approvare"; }
+    else if (!st.riferimento_valido) { f.className = "fascia nd"; f.textContent = "Nessun programma approvato"; }
+    else if (st.hw_ok === false) { f.className = "fascia ko"; f.textContent = "CPU diversa da quella approvata"; }
+    else if (!st.checksum_ok || !st.firma_f_ok) { f.className = "fascia ko"; f.textContent = "Programma diverso da quello approvato"; }
+    else { f.className = "fascia ok"; f.textContent = "Programma uguale a quello approvato"; }
+    $("#inventario").innerHTML = [["Progetto PLC", st.versione], ["Checksum approvato", st.checksum_rif],
+      ["Checksum attuale", st.checksum_att], ["Firma F approvata", st.firma_f_rif], ["Firma F attuale", st.firma_f_att],
+      ["CPU approvata", [st.cpu_fw_rif, st.cpu_seriale_rif].filter(Boolean).join(" ")],
+      ["CPU attuale", [st.cpu_fw, st.cpu_seriale].filter(Boolean).join(" ") + (st.hw_ok === false ? " (diversa)" : "")],
+      ["Quadro elettrico", st.quadro_aperto === undefined ? "" : st.quadro_aperto ? "aperto" : "chiuso"],
+      ["Manutenzione", st.manutenzione === undefined ? "" : st.manutenzione ? "inserita" : "non inserita"]]
+      .map(([a, b]) => `<dt>${esc(a)}</dt><dd>${esc(b || "–")}</dd>`).join("");
+    const np = s.nomi_profinet || {}, m = s.macchina || { profinet: [], ethernet: [] };
+    const macchina = m.profinet.map(d => ["PROFINET n. " + d.n, d.nome || np[String(d.n)] || (d.errore_nome ? "nome non leggibile" : "dispositivo n. " + d.n),
+                                          "–", d.online ? "online" : "offline", d.online, d.commento, "profinet", d.n, ""])
+      .concat(m.ethernet.map(d => ["Ethernet riga " + d.riga, d.nome || "–", d.ip + ":" + d.porta,
+                                   !d.controllato ? "non controllato" : d.online ? "online" : "offline", !d.controllato || d.online,
+                                   d.commento, "ethernet", d.riga, d.ip]));
+    $("#righe-macchina").innerHTML = macchina.length ? macchina.map(([t, nome, ind, stato, ok, comm, tipo, n, ip]) =>
+      `<tr class="${ok ? "" : "attenzione"}"><td>${t}</td><td class="d">${esc(nome)}</td><td class="n">${esc(ind)}</td><td>${stato}</td>
+       <td>${esc(comm || "–")}</td><td><button data-commenta="${tipo}" data-indice="${n}" data-ip="${esc(ip)}" data-attuale="${esc(comm || "")}">Commenta</button></td></tr>`).join("")
+      : '<tr><td colspan="6" class="tenue">Nessun dispositivo PROFINET letto e nessun dispositivo Ethernet impostato sul pannello.</td></tr>';
+    document.querySelectorAll("#righe-macchina [data-commenta]").forEach(b => b.onclick = () =>
+      commenta(b.dataset.commenta, +b.dataset.indice || 0, b.dataset.ip || "", b.dataset.attuale || ""));
+    const nomi = s.nomi_parametri || {};
+    $("#righe-par").innerHTML = (st.parametri || []).map(p => `<tr><td class="n">${p.n}</td>
+      <td>${esc(nomi[String(p.n)] || "Parametro " + p.n)}</td><td class="n">${p.valore}</td>
+      <td class="n">${p.attivo ? p.min : "–"}</td><td class="n">${p.attivo ? p.max : "–"}</td></tr>`).join("")
+      || '<tr><td colspan="5" class="tenue">Nessun dato.</td></tr>';
+  } catch (e) { $("#conn").className = "conn no"; $("#conn").textContent = "Registratore non raggiungibile"; }
+}
+async function aggiornaEventi() {
+  try {
+    const ev = await json("/api/eventi");
+    $("#righe").innerHTML = ev.length ? ev.map(e => `<tr class="${esc(e.livello)}"><td class="n">${e.id}</td>
+      <td class="n">${esc(dataOra(e.ts_plc || e.ts_reg))}</td><td class="d">${esc(e.descrizione)}</td>
+      <td>${e.fonte === "plc" ? "PLC" : "Registratore"}</td></tr>`).join("")
+      : '<tr><td colspan="4" class="tenue">Nessun evento.</td></tr>';
+  } catch (e) { /* segnalato nell'intestazione */ }
+}
+async function verifica() {
+  try {
+    const v = await json("/api/verifica");
+    $("#timbro").className = "timbro " + (v.integro ? "integro" : "alterato");
+    $("#timbro").innerHTML = `<strong>${v.integro ? "Integro" : "Alterato"}</strong><span>${v.voci} voci</span>`;
+    $("#esito").textContent = v.messaggio;
+  } catch (e) { $("#esito").textContent = "Verifica non riuscita: il registratore non risponde."; }
+}
+$("#btn-verifica").addEventListener("click", verifica);
+$("#btn-esporta").addEventListener("click", async () => {
+  try { const r = await json("/api/esporta", { method: "POST" }); $("#esito").textContent = "Copia salvata: " + r.file; }
+  catch (e) { $("#esito").textContent = "Copia non salvata: controllare la cartella delle copie."; }
+});
+async function aggiornaCollegamenti() {
+  try {
+    const c = await json("/api/collegamenti"), f = $("#fascia-coll");
+    const disp = c.rete ? c.rete.dispositivi : [];
+    const est = disp.filter(d => !d.noto), off = disp.filter(d => d.noto && !d.online);
+    if (!c.rete) { f.className = "fascia nd"; f.textContent = "Controllo della rete non attivo (vedi \"rete\" in config.json)"; }
+    else if (c.rete.errore) { f.className = "fascia nd"; f.textContent = "Scansione della rete non riuscita: " + c.rete.errore; }
+    else if (est.length || off.length) {
+      f.className = "fascia ko";
+      f.textContent = [est.length ? est.length + (est.length === 1 ? " dispositivo non noto collegato" : " dispositivi non noti collegati") : "",
+                       off.length ? off.length + (off.length === 1 ? " dispositivo noto offline" : " dispositivi noti offline") : ""]
+                       .filter(Boolean).join(", ");
+    } else { f.className = "fascia ok"; f.textContent = "Tutti i dispositivi noti online, nessun dispositivo esterno"; }
+    if (c.syslog && c.syslog.accesso_recente) { f.className = "fascia ko"; f.textContent += " · accesso alla CPU segnalato via Syslog"; }
+    $("#righe-rete").innerHTML = disp.length ? disp.map(d => {
+      const stato = !d.noto ? "non noto" : d.online ? "online" : "offline";
+      const classe = !d.noto ? "allarme" : d.online ? "" : "attenzione";
+      const btn = d.locale ? "" : d.noto
+        ? `<button data-commenta="rete" data-ip="${esc(d.ip)}" data-attuale="${esc(d.commento || "")}">Commenta</button> <button data-revoca="${esc(d.ip)}">Revoca</button>`
+        : `<button class="primario" data-approva="${esc(d.ip)}">Approva</button>`;
+      return `<tr class="${classe}"><td class="n">${esc(d.ip)}</td><td class="d">${d.noto ? esc(d.nome) : "–"}</td>
+        <td class="n">${esc(d.mac || "–")}</td><td>${stato}</td><td class="n">${esc(dataOra(d.dal))}</td>
+        <td>${esc(d.commento || "–")}</td><td>${btn}</td></tr>`;
+    }).join("") : '<tr><td colspan="7" class="tenue">' + (c.rete ? "Nessun dispositivo trovato finora." : "–") + "</td></tr>";
+    if (c.rete) $("#diag-rete").textContent = `Sottoreti controllate: ${c.rete.sottoreti.join(", ")} · ultima scansione `
+      + `${dataOra(c.rete.ultima_scansione).slice(11) || "–"}: ${c.rete.risposte_ultima_scansione} dispositivi hanno risposto · `
+      + `questo PC: ${c.rete.questo_pc.join(", ") || "nessun indirizzo nelle sottoreti controllate"}`;
+    document.querySelectorAll("[data-approva]").forEach(b => b.onclick = () => azioneDispositivo("approva", b.dataset.approva));
+    document.querySelectorAll("[data-revoca]").forEach(b => b.onclick = () => azioneDispositivo("revoca", b.dataset.revoca));
+    document.querySelectorAll("#righe-rete [data-commenta]").forEach(b => b.onclick = () => commenta("rete", 0, b.dataset.ip, b.dataset.attuale));
+    $("#info-syslog").textContent = !c.syslog ? "Ricezione Syslog non attiva."
+      : c.syslog.errore ? "Syslog: " + c.syslog.errore
+      : `Syslog in ascolto sulla porta ${c.syslog.porta}: ${c.syslog.ultimi.length} messaggi ricevuti` +
+        (c.syslog.ultimi.length ? `, l'ultimo alle ${dataOra(c.syslog.ultimi[0].ora).slice(11)}.` : ".");
+  } catch (e) { /* segnalato nell'intestazione */ }
+}
+
+async function commenta(tipo, indice, ip, attuale) {
+  const testo = prompt("Commento (max 40 caratteri), vuoto per cancellarlo", attuale);
+  if (testo === null) return;
+  const chi = prompt("Chi scrive il commento?"); if (chi === null) return;
+  const pin = prompt("PIN"); if (pin === null) return;
+  const f = new FormData();
+  f.set("tipo", tipo); f.set("indice", indice); f.set("ip", ip); f.set("testo", testo.slice(0, 40)); f.set("chi", chi); f.set("pin", pin);
+  const r = await fetch("/api/commento", { method: "POST", body: f });
+  const d = await r.json().catch(() => ({}));
+  $("#esito-disp").textContent = r.ok ? "Commento salvato."
+                                      : "Commento non salvato: " + (d.detail || r.status);
+  setTimeout(() => { aggiornaStato(); aggiornaCollegamenti(); aggiornaEventi(); }, 3000);
+}
+
+async function azioneDispositivo(tipo, ip) {
+  const f = new FormData();
+  f.set("ip", ip);
+  if (tipo === "approva") {
+    const nome = prompt("Nome del dispositivo " + ip + " (max 16 caratteri, es. Robot R1)");
+    if (nome === null) return;
+    f.set("nome", nome.slice(0, 16));
+  } else if (!confirm("Revocare l'approvazione di " + ip + "?")) return;
+  const chi = prompt("Chi esegue l'operazione?"); if (chi === null) return;
+  const pin = prompt("PIN"); if (pin === null) return;
+  f.set("chi", chi); f.set("pin", pin);
+  const r = await fetch("/api/dispositivi/" + tipo, { method: "POST", body: f });
+  const d = await r.json().catch(() => ({}));
+  $("#esito-disp").textContent = r.ok ? (tipo === "approva" ? "Dispositivo approvato." : "Approvazione revocata.")
+                                      : "Operazione non eseguita: " + (d.detail || r.status);
+  aggiornaCollegamenti(); aggiornaEventi();
+}
+aggiornaStato(); aggiornaEventi(); verifica(); aggiornaCollegamenti();
+setInterval(aggiornaCollegamenti, 5000);
+setInterval(() => { aggiornaStato(); aggiornaEventi(); }, 3000);
+setInterval(verifica, 60000);
+</script>
+</body>
+</html>

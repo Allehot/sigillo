@@ -1,0 +1,41 @@
+FUNCTION "FC_SigilloBaseEvento" : Void
+TITLE = 'Sigillo Base - scrive un evento nel buffer (uso interno di FB_SigilloBase)'
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : SDM
+VERSION : 1.1
+   VAR_INPUT
+      Tipo : Int;
+      Indice : Int;
+      ValPrec : Real;
+      ValNuovo : Real;
+      Extra : DWord;
+   END_VAR
+
+   VAR_TEMP
+      idx : Int;
+      ts : DTL;
+      ret : Int;
+      seq : DInt;
+   END_VAR
+
+
+BEGIN
+	#ret := RD_LOC_T(#ts);
+	#idx := "DB_SigilloBase".IdxScrittura;
+	IF #idx < 0 OR #idx > 31 THEN
+	    #idx := 0;
+	END_IF;
+	IF "DB_SigilloBase".SeqUltimo >= 2000000000 THEN
+	    "DB_SigilloBase".SeqUltimo := 0;
+	END_IF;
+	#seq := "DB_SigilloBase".SeqUltimo + 1;
+	"DB_SigilloBase".Eventi[#idx].Tipo := #Tipo;
+	"DB_SigilloBase".Eventi[#idx].Indice := #Indice;
+	"DB_SigilloBase".Eventi[#idx].Ts := #ts;
+	"DB_SigilloBase".Eventi[#idx].Extra := #Extra;
+	"DB_SigilloBase".Eventi[#idx].ValPrec := #ValPrec;
+	"DB_SigilloBase".Eventi[#idx].ValNuovo := #ValNuovo;
+	"DB_SigilloBase".Eventi[#idx].Seq := #seq;     // per ultimo
+	"DB_SigilloBase".SeqUltimo := #seq;
+	"DB_SigilloBase".IdxScrittura := (#idx + 1) MOD 32;
+END_FUNCTION

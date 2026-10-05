@@ -1,0 +1,432 @@
+FUNCTION_BLOCK "FB_SigilloBase"
+TITLE = 'Sigillo Base - modifiche a programma, firma F, hardware e parametri'
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : SDM
+VERSION : 2.0
+// Da chiamare in OB1 a ogni ciclo, una sola istanza.
+// AvvioConsentito NON e' una funzione di sicurezza: impedisce solo l'avvio del ciclo
+// automatico con programma o hardware non approvati.
+//
+// Eventi:  1 avvio CPU / reinizializzazione   2 programma e hardware approvati
+//          3 programma diverso dall'approvato  4 programma tornato uguale
+//          5 firma F cambiata                  6 avvio automatico bloccato
+//          7 avvio automatico sbloccato        8 errore lettura checksum (Extra = STATUS)
+//          9 CPU diversa dall'approvata (firmware o seriale, Extra = firmware attuale)
+//         10 quadro aperto   11 quadro chiuso   12 manutenzione inserita   13 manutenzione disinserita
+//         14 parametro modificato     (Indice = n., ValPrec / ValNuovo)
+//         15 valore fuori limite rifiutato (ValPrec = valore mantenuto, ValNuovo = rifiutato)
+//         16 limiti modificati        (ValPrec = minimo, ValNuovo = massimo, Extra = attivo)
+//         17 lettura firmware/seriale CPU non riuscita (Extra = STATUS)
+//         18 dispositivo PROFINET offline   19 dispositivo PROFINET online   (Indice = n. dispositivo)
+//         20 dispositivo Ethernet offline   21 dispositivo Ethernet online   (Indice = riga del pannello)
+//         26 nome PROFINET non leggibile   (Indice = n. dispositivo, Extra = STATUS)
+//
+// DA VERIFICARE AL BANCO: DeviceStates (MODE 1 = configurati, 4 = presenti) e la costante
+// di sistema dell'IO-System PROFINET da collegare a LaddrIoSystem. Get_Name: verificato senza REQ
+// (parametri LADDR, STATION_NR, DATA, DONE, ERROR, STATUS). Nomi letti per i dispositivi 1..16.
+   VAR_INPUT
+      PeriodoControllo : Time := T#10S;
+      FirmaF : DWord;                      // da F_SYST_INFO; 16#0 se la CPU non e' F
+      BloccaAvvio : Bool := TRUE;          // FALSE solo durante la messa in servizio
+      QuadroAperto : Bool;                 // finecorsa porta quadro (FALSE se assente)
+      ChiaveManutenzione : Bool;           // selettore manutenzione (FALSE se assente)
+      LaddrCpu : HW_IO;                    // HW ID della CPU, es. "Local~Common"
+      LaddrIoSystem : HW_IOSYSTEM;         // IO-System PROFINET, es. "Local~PROFINET_IO-System"; 0 = non usato
+      TolleranzaParam : Real := 0.0001;    // variazione minima considerata modifica
+   END_VAR
+
+   VAR_OUTPUT
+      AvvioConsentito : Bool;              // in AND con il consenso al ciclo automatico
+      Allarme : Bool;                      // programma, firma F o hardware diversi dall'approvato
+   END_VAR
+
+   VAR_IN_OUT
+      Parametri : Array[1..16] of Real;    // parametri impostabili: la macchina deve usare QUESTI valori
+   END_VAR
+
+   VAR
+      iGetChk : GetChecksum;
+      iIM : Get_IM_Data;
+      tPeriodo : TON_TIME;
+      bufChk : Array[0..7] of Byte;
+      bufIM : Array[0..63] of Byte;
+      req : Bool;
+      reqIM : Bool;
+      inizializzato : Bool;                // non a ritenzione: FALSE dopo ogni avvio
+      primaVerifica : Bool;
+      bloccoArmato : Bool;
+      ultimaFirmaF : DWord;
+      erroreSegnalato : Bool;
+      hwSegnalato : Bool;
+      ultimoQuadro : Bool;
+      ultimaChiave : Bool;
+      ultimoParam : Array[1..16] of Real;
+      ultimoMin : Array[1..16] of Real;
+      ultimoMax : Array[1..16] of Real;
+      ultimoAttivo : Array[1..16] of Bool;
+      tDisp : TON_TIME;                    // controllo dei dispositivi ogni 2 s
+      bufCfg : Array[0..127] of Byte;      // DeviceStates MODE 1 (1024 bit)
+      bufPres : Array[0..127] of Byte;     // DeviceStates MODE 4
+      ultimoPn : Array[0..15] of Byte;     // online = configurato AND presente, ciclo precedente
+      pnInit : Bool;
+      ultimaEthVita : Int;
+      ultimaEthMaschera : Word;
+      ultimaEthOnline : Word;
+      ethInit : Bool;
+      // nomi PROFINET (Get_Name non ha REQ: lavora finche' viene chiamato)
+      iNome : Get_Name;
+      tNome : TON_TIME;                    // tempo massimo per un dispositivo
+      tPausa : TON_TIME;                   // pausa tra un dispositivo e l'altro
+      statoNome : Int;                     // 0 fermo, 1 cerca, 2 lettura, 3 pausa
+      nScan : Int;                         // dispositivo in lettura (1..16)
+      chiamate : Int;                      // chiamate a Get_Name per il dispositivo in corso
+      nomeLetto : String[254];
+      nomiAvviati : Bool;
+   END_VAR
+
+   VAR_TEMP
+      i : Int;
+      j : Int;
+      chkValido : Bool;
+      diverso : Bool;
+      extra : DWord;
+      valido : Real;
+      ret : Int;
+      n : Int;
+      onAtt : Bool;
+      onPrec : Bool;
+      maschera : Word;
+   END_VAR
+
+
+BEGIN
+	// ---------------------------------------------------------------- contatore di vita
+	IF "DB_SigilloBase".Vita >= 2000000000 THEN
+	    "DB_SigilloBase".Vita := 0;
+	ELSE
+	    "DB_SigilloBase".Vita := "DB_SigilloBase".Vita + 1;
+	END_IF;
+	
+	// ---------------------------------------------------------------- primo ciclo
+	IF NOT #inizializzato THEN
+	    #inizializzato := TRUE;
+	    #primaVerifica := TRUE;
+	    #bloccoArmato := TRUE;
+	    #req := TRUE;
+	    #reqIM := TRUE;
+	    #ultimaFirmaF := #FirmaF;
+	    #ultimoQuadro := #QuadroAperto;
+	    #ultimaChiave := #ChiaveManutenzione;
+	    FOR #i := 1 TO 16 DO
+	        #ultimoParam[#i] := #Parametri[#i];
+	        #ultimoMin[#i] := "DB_SigilloBase".Limiti[#i].Min;
+	        #ultimoMax[#i] := "DB_SigilloBase".Limiti[#i].Max;
+	        #ultimoAttivo[#i] := "DB_SigilloBase".Limiti[#i].Attivo;
+	    END_FOR;
+	    "FC_SigilloBaseEvento"(Tipo := 1, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := #FirmaF);
+	END_IF;
+	
+	// ---------------------------------------------------------------- hardware: identita' CPU
+	// Get_IM_Data legge l'I&M0 della CPU una volta dopo ogni avvio:
+	// numero di serie ai byte 22..37, revisione firmware ai byte 40..43
+	IF #reqIM THEN
+	    #iIM(LADDR := #LaddrCpu, IM_TYPE := 0, DATA := #bufIM);
+	    IF #iIM.DONE THEN
+	        #reqIM := FALSE;
+	        "DB_SigilloBase".Hw.ErroreIM := FALSE;
+	        "DB_SigilloBase".CpuFwAtt := SHL(IN := BYTE_TO_DWORD(#bufIM[40]), N := 24)
+	                                    OR SHL(IN := BYTE_TO_DWORD(#bufIM[41]), N := 16)
+	                                    OR SHL(IN := BYTE_TO_DWORD(#bufIM[42]), N := 8)
+	                                    OR BYTE_TO_DWORD(#bufIM[43]);
+	        Chars_TO_Strg(Chars := #bufIM, pChars := 22, Cnt := 16, Strg => "DB_SigilloBase".CpuSerialeAtt);
+	    ELSIF #iIM.ERROR THEN
+	        #reqIM := FALSE;
+	        "DB_SigilloBase".Hw.ErroreIM := TRUE;
+	        "FC_SigilloBaseEvento"(Tipo := 17, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0,
+	                               Extra := WORD_TO_DWORD(#iIM.STATUS));
+	    END_IF;
+	END_IF;
+	
+	// confronto con l'hardware approvato (solo dopo aver letto i dati della CPU)
+	IF NOT #reqIM AND "DB_SigilloBase".Stato.RiferimentoValido THEN
+	    "DB_SigilloBase".Stato.HwOk := "DB_SigilloBase".CpuFwAtt = "DB_SigilloBase".CpuFwRif
+	                                   AND "DB_SigilloBase".CpuSerialeAtt = "DB_SigilloBase".CpuSerialeRif;
+	    IF NOT "DB_SigilloBase".Stato.HwOk AND NOT #hwSegnalato THEN
+	        "FC_SigilloBaseEvento"(Tipo := 9, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0,
+	                               Extra := "DB_SigilloBase".CpuFwAtt);
+	        #hwSegnalato := TRUE;
+	        #bloccoArmato := TRUE;
+	    ELSIF "DB_SigilloBase".Stato.HwOk THEN
+	        #hwSegnalato := FALSE;
+	    END_IF;
+	ELSIF NOT "DB_SigilloBase".Stato.RiferimentoValido THEN
+	    "DB_SigilloBase".Stato.HwOk := TRUE;
+	END_IF;
+	
+	// ---------------------------------------------------------------- hardware: quadro e manutenzione
+	"DB_SigilloBase".Hw.QuadroAperto := #QuadroAperto;
+	IF #QuadroAperto <> #ultimoQuadro THEN
+	    IF #QuadroAperto THEN
+	        "FC_SigilloBaseEvento"(Tipo := 10, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	    ELSE
+	        "FC_SigilloBaseEvento"(Tipo := 11, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	    END_IF;
+	    #ultimoQuadro := #QuadroAperto;
+	END_IF;
+	"DB_SigilloBase".Hw.ChiaveManutenzione := #ChiaveManutenzione;
+	IF #ChiaveManutenzione <> #ultimaChiave THEN
+	    IF #ChiaveManutenzione THEN
+	        "FC_SigilloBaseEvento"(Tipo := 12, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	    ELSE
+	        "FC_SigilloBaseEvento"(Tipo := 13, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	    END_IF;
+	    #ultimaChiave := #ChiaveManutenzione;
+	END_IF;
+	
+	// ---------------------------------------------------------------- parametri e limiti
+	FOR #i := 1 TO 16 DO
+	    // modifica dei limiti
+	    IF "DB_SigilloBase".Limiti[#i].Min <> #ultimoMin[#i] OR "DB_SigilloBase".Limiti[#i].Max <> #ultimoMax[#i]
+	       OR "DB_SigilloBase".Limiti[#i].Attivo <> #ultimoAttivo[#i] THEN
+	        "FC_SigilloBaseEvento"(Tipo := 16, Indice := #i, ValPrec := "DB_SigilloBase".Limiti[#i].Min,
+	                               ValNuovo := "DB_SigilloBase".Limiti[#i].Max,
+	                               Extra := BOOL_TO_DWORD("DB_SigilloBase".Limiti[#i].Attivo));
+	        #ultimoMin[#i] := "DB_SigilloBase".Limiti[#i].Min;
+	        #ultimoMax[#i] := "DB_SigilloBase".Limiti[#i].Max;
+	        #ultimoAttivo[#i] := "DB_SigilloBase".Limiti[#i].Attivo;
+	    END_IF;
+	    // valore fuori limite: rifiutato, resta l'ultimo valore valido
+	    IF "DB_SigilloBase".Limiti[#i].Attivo AND "DB_SigilloBase".Limiti[#i].Max >= "DB_SigilloBase".Limiti[#i].Min THEN
+	        IF #Parametri[#i] < "DB_SigilloBase".Limiti[#i].Min OR #Parametri[#i] > "DB_SigilloBase".Limiti[#i].Max THEN
+	            #valido := LIMIT(MN := "DB_SigilloBase".Limiti[#i].Min, IN := #ultimoParam[#i],
+	                             MX := "DB_SigilloBase".Limiti[#i].Max);
+	            "FC_SigilloBaseEvento"(Tipo := 15, Indice := #i, ValPrec := #valido,
+	                                   ValNuovo := #Parametri[#i], Extra := 0);
+	            #Parametri[#i] := #valido;
+	        END_IF;
+	    END_IF;
+	    // modifica del valore
+	    IF ABS(#Parametri[#i] - #ultimoParam[#i]) > #TolleranzaParam THEN
+	        "FC_SigilloBaseEvento"(Tipo := 14, Indice := #i, ValPrec := #ultimoParam[#i],
+	                               ValNuovo := #Parametri[#i], Extra := 0);
+	        #ultimoParam[#i] := #Parametri[#i];
+	    END_IF;
+	    "DB_SigilloBase".ParamAtt[#i] := #Parametri[#i];
+	END_FOR;
+	
+	// ---------------------------------------------------------------- dispositivi della macchina
+	#tDisp(IN := NOT #tDisp.Q, PT := T#2S);
+	IF #tDisp.Q THEN
+	    // PROFINET: la CPU sa quali dispositivi configurati sono raggiungibili
+	    IF #LaddrIoSystem <> 0 THEN
+	        #ret := DeviceStates(LADDR := #LaddrIoSystem, MODE := 1, STATE := #bufCfg);
+	        IF #ret = 0 THEN
+	            #ret := DeviceStates(LADDR := #LaddrIoSystem, MODE := 4, STATE := #bufPres);
+	        END_IF;
+	        IF #ret = 0 THEN
+	            FOR #n := 1 TO 127 DO           // il bit 0 e' il bit di gruppo: si parte da 1
+	                #onAtt := (#bufCfg[#n / 8] AND #bufPres[#n / 8] AND SHL(IN := BYTE#1, N := INT_TO_USINT(#n MOD 8))) <> 0;
+	                #onPrec := (#ultimoPn[#n / 8] AND SHL(IN := BYTE#1, N := INT_TO_USINT(#n MOD 8))) <> 0;
+	                IF #pnInit AND #onAtt <> #onPrec
+	                   AND (#bufCfg[#n / 8] AND SHL(IN := BYTE#1, N := INT_TO_USINT(#n MOD 8))) <> 0 THEN
+	                    IF #onAtt THEN
+	                        "FC_SigilloBaseEvento"(Tipo := 19, Indice := #n, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	                    ELSE
+	                        "FC_SigilloBaseEvento"(Tipo := 18, Indice := #n, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	                    END_IF;
+	                END_IF;
+	            END_FOR;
+	            FOR #j := 0 TO 15 DO
+	                #ultimoPn[#j] := #bufCfg[#j] AND #bufPres[#j];
+	                "DB_SigilloBase".PnConfigurati[#j] := #bufCfg[#j];
+	                "DB_SigilloBase".PnPresenti[#j] := #bufPres[#j];
+	            END_FOR;
+	            #pnInit := TRUE;
+	        END_IF;
+	    END_IF;
+	
+	    // Ethernet: lo stato e' scritto dal pannello; si considera solo se il pannello e' vivo
+	    IF "DB_SigilloBase".EthVita <> #ultimaEthVita THEN
+	        #ultimaEthVita := "DB_SigilloBase".EthVita;
+	        #maschera := "DB_SigilloBase".EthMaschera;
+	        IF #ethInit AND #maschera = #ultimaEthMaschera THEN
+	            FOR #n := 0 TO 15 DO
+	                IF (#maschera AND SHL(IN := WORD#1, N := INT_TO_USINT(#n))) <> 0 THEN
+	                    #onAtt := ("DB_SigilloBase".EthOnline AND SHL(IN := WORD#1, N := INT_TO_USINT(#n))) <> 0;
+	                    #onPrec := (#ultimaEthOnline AND SHL(IN := WORD#1, N := INT_TO_USINT(#n))) <> 0;
+	                    IF #onAtt AND NOT #onPrec THEN
+	                        "FC_SigilloBaseEvento"(Tipo := 21, Indice := #n + 1, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	                    ELSIF #onPrec AND NOT #onAtt THEN
+	                        "FC_SigilloBaseEvento"(Tipo := 20, Indice := #n + 1, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	                    END_IF;
+	                END_IF;
+	            END_FOR;
+	        END_IF;
+	        #ultimaEthMaschera := #maschera;       // elenco cambiato sul pannello: nuovo riferimento
+	        #ultimaEthOnline := "DB_SigilloBase".EthOnline;
+	        #ethInit := TRUE;
+	    END_IF;
+	END_IF;
+	
+	// ---------------------------------------------------------------- nomi PROFINET (Get_Name)
+	// Parte dopo la prima lettura di DeviceStates e ogni volta che l'HMI imposta PnCmd.Rileggi.
+	// Get_Name non ha REQ: si chiama a ogni ciclo mentre si legge un dispositivo. Il primo DONE
+	// puo' riportare il risultato della lettura precedente: si accetta il nome solo dopo che
+	// l'istruzione e' passata da BUSY, oppure dalla terza chiamata, e solo se non e' vuoto.
+	IF (#pnInit AND NOT #nomiAvviati) OR "DB_SigilloBase".PnCmd.Rileggi THEN
+	    #nomiAvviati := TRUE;
+	    "DB_SigilloBase".PnCmd.Rileggi := FALSE;
+	    #nScan := 0;
+	    #statoNome := 3;                           // dalla pausa si passa al dispositivo 1
+	END_IF;
+	
+	CASE #statoNome OF
+	    1:  // il dispositivo nScan e' configurato?
+	        IF (#bufCfg[#nScan / 8] AND SHL(IN := BYTE#1, N := INT_TO_USINT(#nScan MOD 8))) <> 0 THEN
+	            #nomeLetto := '';
+	            #chiamate := 0;
+	            #statoNome := 2;
+	        ELSE
+	            #statoNome := 3;
+	        END_IF;
+	
+	    2:  // lettura del nome
+	        #iNome(LADDR := #LaddrIoSystem,
+	               STATION_NR := INT_TO_UINT(#nScan),
+	               DATA := #nomeLetto);
+	        #chiamate := #chiamate + 1;
+	        IF #iNome.BUSY THEN
+	            #chiamate := 10;                       // ha lavorato davvero: il prossimo DONE e' buono
+	        END_IF;
+	        IF #iNome.ERROR OR #tNome.Q THEN
+	            "DB_SigilloBase".PnNomi[#nScan] := '';
+	            "DB_SigilloBase".PnNomiErrore[#nScan] := TRUE;
+	            "FC_SigilloBaseEvento"(Tipo := 26, Indice := #nScan, ValPrec := 0.0, ValNuovo := 0.0,
+	                                   Extra := WORD_TO_DWORD(#iNome.STATUS));
+	            #statoNome := 3;
+	        ELSIF #iNome.DONE AND #chiamate >= 3 AND #nomeLetto <> '' THEN
+	            "DB_SigilloBase".PnNomi[#nScan] := LEFT(IN := #nomeLetto, L := 24);
+	            "DB_SigilloBase".PnNomiErrore[#nScan] := FALSE;
+	            #statoNome := 3;
+	        END_IF;
+	
+	    3:  // pausa di 100 ms, poi il dispositivo successivo
+	        IF #tPausa.Q THEN
+	            #nScan := #nScan + 1;
+	            IF #nScan > 16 THEN
+	                #statoNome := 0;                   // letti tutti: fermo fino al prossimo Rileggi
+	            ELSE
+	                #statoNome := 1;
+	            END_IF;
+	        END_IF;
+	
+	    ELSE:
+	        ;
+	END_CASE;
+	#tNome(IN := #statoNome = 2, PT := T#3S);
+	#tPausa(IN := #statoNome = 3, PT := T#100MS);
+	
+	// ---------------------------------------------------------------- firma F
+	IF #FirmaF <> #ultimaFirmaF THEN
+	    "FC_SigilloBaseEvento"(Tipo := 5, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := #FirmaF);
+	    #ultimaFirmaF := #FirmaF;
+	    #bloccoArmato := TRUE;
+	END_IF;
+	"DB_SigilloBase".FirmaFAtt := #FirmaF;
+	"DB_SigilloBase".Stato.FirmaFOk := #FirmaF = "DB_SigilloBase".FirmaFRif;
+	
+	// ---------------------------------------------------------------- checksum
+	#tPeriodo(IN := NOT #tPeriodo.Q, PT := #PeriodoControllo);
+	IF #tPeriodo.Q OR "DB_SigilloBase".Cmd.RichiediLettura OR "DB_SigilloBase".Cmd.ImpostaRiferimento THEN
+	    #req := TRUE;
+	    "DB_SigilloBase".Cmd.RichiediLettura := FALSE;
+	END_IF;
+	
+	#iGetChk(SCOPE := 1, CHECKSUM := #bufChk);   // chiamato a ogni ciclo: bufChk sempre aggiornato
+	
+	#chkValido := FALSE;
+	FOR #j := 0 TO 7 DO
+	    IF #bufChk[#j] <> 0 THEN
+	        #chkValido := TRUE;
+	    END_IF;
+	END_FOR;
+	
+	IF #iGetChk.ERROR THEN
+	    "DB_SigilloBase".Stato.ErroreLettura := TRUE;
+	    IF NOT #erroreSegnalato THEN
+	        "FC_SigilloBaseEvento"(Tipo := 8, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0,
+	                               Extra := WORD_TO_DWORD(#iGetChk.STATUS));
+	        #erroreSegnalato := TRUE;
+	    END_IF;
+	
+	ELSIF #req AND #chkValido THEN
+	    #req := FALSE;
+	    #erroreSegnalato := FALSE;
+	    "DB_SigilloBase".Stato.ErroreLettura := FALSE;
+	    FOR #j := 0 TO 7 DO
+	        "DB_SigilloBase".ChecksumAtt[#j] := #bufChk[#j];
+	    END_FOR;
+	    #extra := SHL(IN := BYTE_TO_DWORD(#bufChk[0]), N := 24) OR SHL(IN := BYTE_TO_DWORD(#bufChk[1]), N := 16)
+	              OR SHL(IN := BYTE_TO_DWORD(#bufChk[2]), N := 8) OR BYTE_TO_DWORD(#bufChk[3]);
+	
+	    IF "DB_SigilloBase".Cmd.ImpostaRiferimento THEN
+	        // approvazione: programma, firma F e hardware attuali diventano il riferimento
+	        FOR #j := 0 TO 7 DO
+	            "DB_SigilloBase".ChecksumRif[#j] := #bufChk[#j];
+	        END_FOR;
+	        "DB_SigilloBase".FirmaFRif := #FirmaF;
+	        "DB_SigilloBase".CpuFwRif := "DB_SigilloBase".CpuFwAtt;
+	        "DB_SigilloBase".CpuSerialeRif := "DB_SigilloBase".CpuSerialeAtt;
+	        "DB_SigilloBase".Stato.RiferimentoValido := TRUE;
+	        "DB_SigilloBase".Stato.ChecksumOk := TRUE;
+	        "DB_SigilloBase".Stato.FirmaFOk := TRUE;
+	        "DB_SigilloBase".Stato.HwOk := TRUE;
+	        "DB_SigilloBase".Stato.AvvioBloccato := FALSE;
+	        "DB_SigilloBase".Cmd.ImpostaRiferimento := FALSE;
+	        #hwSegnalato := FALSE;
+	        "FC_SigilloBaseEvento"(Tipo := 2, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := #extra);
+	
+	    ELSIF "DB_SigilloBase".Stato.RiferimentoValido THEN
+	        #diverso := FALSE;
+	        FOR #j := 0 TO 7 DO
+	            IF #bufChk[#j] <> "DB_SigilloBase".ChecksumRif[#j] THEN
+	                #diverso := TRUE;
+	            END_IF;
+	        END_FOR;
+	        IF #diverso AND ("DB_SigilloBase".Stato.ChecksumOk OR #primaVerifica) THEN
+	            "FC_SigilloBaseEvento"(Tipo := 3, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := #extra);
+	            #bloccoArmato := TRUE;
+	        ELSIF NOT #diverso AND NOT "DB_SigilloBase".Stato.ChecksumOk THEN
+	            "FC_SigilloBaseEvento"(Tipo := 4, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := #extra);
+	        END_IF;
+	        "DB_SigilloBase".Stato.ChecksumOk := NOT #diverso;
+	    ELSE
+	        "DB_SigilloBase".Stato.ChecksumOk := FALSE;
+	    END_IF;
+	    #primaVerifica := FALSE;
+	END_IF;
+	
+	// ---------------------------------------------------------------- blocco avvio
+	// scatta una volta per ogni avvio o nuova modifica rilevata (programma, firma F, hardware)
+	IF #bloccoArmato AND NOT #primaVerifica THEN
+	    IF #BloccaAvvio AND NOT "DB_SigilloBase".Stato.AvvioBloccato
+	       AND (NOT "DB_SigilloBase".Stato.RiferimentoValido OR NOT "DB_SigilloBase".Stato.ChecksumOk
+	            OR NOT "DB_SigilloBase".Stato.FirmaFOk OR NOT "DB_SigilloBase".Stato.HwOk) THEN
+	        "DB_SigilloBase".Stato.AvvioBloccato := TRUE;
+	        "FC_SigilloBaseEvento"(Tipo := 6, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	    END_IF;
+	    #bloccoArmato := FALSE;
+	END_IF;
+	IF "DB_SigilloBase".Cmd.SbloccaAvvio THEN
+	    "DB_SigilloBase".Cmd.SbloccaAvvio := FALSE;
+	    IF "DB_SigilloBase".Stato.AvvioBloccato THEN
+	        "DB_SigilloBase".Stato.AvvioBloccato := FALSE;
+	        "FC_SigilloBaseEvento"(Tipo := 7, Indice := 0, ValPrec := 0.0, ValNuovo := 0.0, Extra := 0);
+	    END_IF;
+	END_IF;
+	
+	#AvvioConsentito := NOT "DB_SigilloBase".Stato.AvvioBloccato;
+	#Allarme := "DB_SigilloBase".Stato.RiferimentoValido
+	            AND (NOT "DB_SigilloBase".Stato.ChecksumOk OR NOT "DB_SigilloBase".Stato.FirmaFOk
+	                 OR NOT "DB_SigilloBase".Stato.HwOk);
+END_FUNCTION_BLOCK

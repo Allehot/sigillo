@@ -1,0 +1,18 @@
+TYPE "SigilloBase_Evento"
+TITLE = 'Sigillo Base - evento del registro'
+AUTHOR : SDM
+VERSION : 1.1
+// 32 byte in un DB ad accesso standard:
+//   Seq 0 (DInt, scritto per ultimo), Tipo 4 (Int), Indice 6 (Int), Ts 8 (DTL),
+//   Extra 20 (DWord), ValPrec 24 (Real), ValNuovo 28 (Real)
+   STRUCT
+      Seq : DInt;
+      Tipo : Int;
+      Indice : Int;                        // n. parametro o dettaglio
+      Ts : DTL;
+      Extra : DWord;
+      ValPrec : Real;                      // valore precedente (parametri, limiti)
+      ValNuovo : Real;                     // valore nuovo
+   END_STRUCT;
+
+END_TYPE
