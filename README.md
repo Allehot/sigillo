@@ -113,6 +113,12 @@ altro. Se un blocco lungo dà "cannot get data", dividilo: `dbPn` 62 + `dbPn2` (
 
 **Schede**
 - **Stato**: programma, firma F, CPU, quadro, manutenzione, avvio, riepilogo dei collegamenti.
+
+In cima, sopra ogni scheda, ci sono **due fasce**, ognuna con il proprio colore. Così un problema non ne
+nasconde un altro:
+1. **programma e CPU**: approvato / modificato / avvio bloccato / CPU diversa / CPU in STOP;
+2. **dispositivi e orologio**: dispositivi offline, esterni sulla rete, accesso alla CPU, orologio
+   della CPU sbagliato.
 - **Parametri**: valori e limiti.
 - **Dispositivi → Macchina**: dispositivi PROFINET con il nome letto da TIA e dispositivi Ethernet
   con IP e porta, stato online/offline e commento. "Aggiungi dispositivo Ethernet" apre l'editor con
@@ -225,8 +231,14 @@ Dettagli:
   chiama (OB1). Minimo e massimo valgono dall'ultimo avvio o dall'ultimo azzeramento; le prime due misure
   dopo l'avvio si scartano.
 - **Ora.** Il FB copia a ogni ciclo l'ora locale della CPU (`RD_LOC_T`, la stessa usata per gli eventi).
-  Il pannello la confronta con il proprio orologio e il registratore con quello del PC; oltre i 60 s
-  (`tolleranza_ora_s`) segnalano "Orologio della CPU sbagliato". Il registratore annota l'evento una
+  Il registratore la confronta con l'orologio del PC. Il pannello usa quel confronto quando il
+  registratore risponde, altrimenti confronta l'ora con il proprio orologio. Oltre i 60 s
+  (`tolleranza_ora_s`) segnalano "Orologio della CPU sbagliato".
+  **Attenzione:** se il pannello prende l'ora dal PLC (sincronizzazione dell'orologio nelle impostazioni
+  di sistema del pannello), i due orologi sono sempre uguali e il confronto con il pannello non dice
+  niente. Per questo il riferimento è il registratore. Nella scheda CPU compaiono l'ora della CPU, quella
+  del pannello e i due confronti. Se la CPU è sbagliata rispetto al registratore ma uguale al pannello,
+  compare "(pannello sincronizzato col PLC?)". Il registratore annota l'evento una
   volta e annota il ritorno nella norma sotto metà della tolleranza. In STOP l'ora nel DB è ferma e il
   confronto si sospende.
 - **Avvii.** Il contatore sta nel DB a ritenzione e cresce a ogni avvio. Il numero compare anche

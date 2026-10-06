@@ -39,7 +39,7 @@ const NOMI_PARAMETRI = [
 ];
 const FONT = "Arial";
 const SONDA_OGNI_MS = 5000, SONDA_TENTATIVI_OFFLINE = 3, REGISTRATORE_OGNI_MS = 5000;
-const TOLLERANZA_ORA_S = 60;   // differenza massima tra l'orologio della CPU e quello del pannello
+const TOLLERANZA_ORA_S = 60;   // differenza massima tra l'orologio della CPU e quello di riferimento
 
 // ------------------------------------------------------------------ costanti
 // [campo, parole, byte di partenza]; i campi con numero sono facoltativi (lettura divisa)
@@ -70,6 +70,7 @@ const eth = Array.from({ length: 16 }, () => ({ chiave: "", online: null, mancat
 let ethVita = 0, sondaInCorso = false;
 // dati del registratore
 let reg = null, regUltimo = 0, regErrore = "", regInCorso = false, ultimoInvioEth = 0;
+let pannelloMenoReg = null;    // secondi: orologio del pannello meno quello del registratore
 
 // ------------------------------------------------------------------ decodifica
 function inByte(v) {
@@ -325,7 +326,11 @@ async function aggiornaRegistratore() {
   if (regInCorso || !registratoreConfigurato()) return;
   regInCorso = true;
   const r = await http("GET", REGISTRATORE.url + "/api/pannello?token=" + encodeURIComponent(REGISTRATORE.token));
-  if (r.ok && r.dati) { reg = r.dati; regUltimo = Date.now(); regErrore = ""; }
+  if (r.ok && r.dati) {
+    reg = r.dati; regUltimo = Date.now(); regErrore = "";
+    const t = reg.ora ? Date.parse(reg.ora) : NaN;
+    pannelloMenoReg = isNaN(t) ? null : Math.round((regUltimo - t) / 1000);
+  }
   else regErrore = r.codice === 401 ? "token errato" : r.errore;
   if (Date.now() - ultimoInvioEth > 60000) inviaElencoEth();
   regInCorso = false;
@@ -540,7 +545,7 @@ function testoCollegamenti() {
   if (!stato) return "";
   const parti = [], mo = macchinaOffline();
   if (mo.length) parti.push(mo.length === 1 ? mo[0] + " offline" : mo.length + " dispositivi della macchina offline");
-  if (!registratoreAttivo()) return parti.concat(["rete esterna non controllata (registratore non raggiungibile)"]).join(", ");
+  if (!registratoreAttivo()) return parti.concat(["registratore non raggiungibile, rete esterna non controllata"]).join(", ");
   if (reg.esterni) parti.push(reg.esterni === 1 ? "dispositivo esterno " + reg.rete.find(d => !d.noto).ip : reg.esterni + " dispositivi esterni");
   if (reg.noti_offline) parti.push(reg.noti_offline === 1 ? reg.rete.find(d => d.noto && !d.online).nome + " offline" : reg.noti_offline + " dispositivi noti offline");
   if (reg.accesso_cpu) parti.push("accesso alla CPU segnalato");
@@ -563,12 +568,20 @@ function statoCpu() {
   return { modo: "", testo: "in verifica", fonte: "contatore di vita" };
 }
 
-// orologio della CPU confrontato con quello del pannello (solo mentre il FB aggiorna l'ora)
-function oraCpuErrata() {
-  return !!stato && !!stato.cpu && stato.cpu.differenza !== null && vitaFerma === 0 && Math.abs(stato.cpu.differenza) > TOLLERANZA_ORA_S;
+// Orologio della CPU (solo mentre il FB aggiorna l'ora). Il riferimento e' il PC del registratore quando
+// risponde: e' indipendente dal PLC. L'orologio del pannello puo' essere sincronizzato con quello del
+// PLC (impostazioni di sistema del pannello): in quel caso il confronto con il pannello da' sempre "allineata".
+function confrontoOra() {
+  if (!stato || !stato.cpu || !stato.cpu.ora || vitaFerma !== 0) return null;
+  if (registratoreAttivo() && reg.cpu && typeof reg.cpu.differenza_ora_s === "number") {
+    return { diff: reg.cpu.differenza_ora_s, rif: "registratore" };
+  }
+  return { diff: stato.cpu.differenza, rif: "pannello" };
 }
+function oraCpuErrata() { const c = confrontoOra(); return !!c && Math.abs(c.diff) > TOLLERANZA_ORA_S; }
 
-function condizione() {
+// Due fasce sempre visibili: programma e CPU sopra, dispositivi e orologio sotto, ognuna con il suo colore.
+function condizioneProgramma() {
   if (errore) return ["PLC non raggiungibile", errore, COL.allarmeFondo, COL.allarme];
   if (!stato) return ["Lettura in corso…", "", COL.pannello, COL.tenue];
   const cpu = statoCpu();
@@ -576,21 +589,39 @@ function condizione() {
   if (cpu.modo === "FB") return ["FB_SigilloBase non in esecuzione", "La CPU è in RUN ma il contatore di vita è fermo", COL.allarmeFondo, COL.allarme];
   if (cpu.modo === "FERMO") return ["CPU in STOP o FB_SigilloBase non in esecuzione", "Il contatore di vita è fermo", COL.allarmeFondo, COL.allarme];
   if (stato.avvioBloccato) {
-    const causa = !stato.riferimentoValido ? "Nessun programma approvato" : !stato.hwOk ? "CPU diversa da quella approvata"
-                : !stato.firmaFOk ? "Firma F cambiata" : !stato.checksumOk ? "Programma modificato" : "Modifica rilevata";
-    return ["Avvio automatico bloccato", causa + ": serve l'approvazione di un utente autorizzato", COL.allarmeFondo, COL.allarme];
+    const causa = !stato.riferimentoValido ? "nessun programma approvato" : !stato.hwOk ? "CPU diversa da quella approvata"
+                : !stato.firmaFOk ? "firma F cambiata" : !stato.checksumOk ? "programma modificato" : "modifica rilevata";
+    return ["Avvio automatico bloccato", causa.charAt(0).toUpperCase() + causa.slice(1) + ": serve l'approvazione di un utente autorizzato", COL.allarmeFondo, COL.allarme];
   }
   if (!stato.hwOk) return ["CPU diversa da quella approvata", "Firmware o numero di serie cambiati: " + (stato.cpuFw || "–") + " " + stato.cpuSeriale, COL.allarmeFondo, COL.allarme];
   if (!stato.riferimentoValido) return ["Nessun programma approvato", "Approvare il programma al termine del collaudo", COL.attFondo, COL.att];
   if (!stato.checksumOk || !stato.firmaFOk) return ["Programma diverso da quello approvato", !stato.firmaFOk ? "Firma del programma di sicurezza cambiata" : "Checksum del programma cambiato", COL.allarmeFondo, COL.allarme];
   if (stato.erroreLettura) return ["Checksum non leggibile", "Errore di GetChecksum nel PLC", COL.attFondo, COL.att];
-  if (registratoreAttivo() && reg.esterni) return ["Dispositivo esterno collegato alla rete", testoCollegamenti(), COL.attFondo, COL.att];
-  if (macchinaOffline().length) return ["Dispositivo della macchina offline", testoCollegamenti(), COL.attFondo, COL.att];
-  if (registratoreAttivo() && (reg.noti_offline || reg.accesso_cpu)) {
-    return [reg.noti_offline ? "Dispositivo noto offline" : "Accesso alla CPU segnalato", testoCollegamenti(), COL.attFondo, COL.att];
-  }
-  if (oraCpuErrata()) return ["Orologio della CPU sbagliato", "CPU " + testoDifferenza(stato.cpu.differenza) + " rispetto al pannello: le date del registro sono sbagliate", COL.attFondo, COL.att];
   return ["Programma uguale a quello approvato", "Nessuna modifica rilevata", COL.okFondo, COL.ok];
+}
+
+function condizioneCollegamenti() {
+  if (errore || !stato) return ["Dispositivi", "–", COL.pannello, COL.tenue];
+  const att = registratoreAttivo(), ora = oraCpuErrata() ? confrontoOra() : null;
+  const orologio = ora ? "CPU " + testoDifferenza(ora.diff) + " rispetto al " + ora.rif + ": date del registro sbagliate" : "";
+  const titolo = att && reg.esterni ? "Dispositivo esterno collegato alla rete"
+               : macchinaOffline().length ? "Dispositivo della macchina offline"
+               : att && reg.noti_offline ? "Dispositivo noto offline"
+               : att && reg.accesso_cpu ? "Accesso alla CPU segnalato"
+               : ora ? "Orologio della CPU sbagliato" : "";
+  if (titolo === "Orologio della CPU sbagliato") return [titolo, orologio, COL.attFondo, COL.att];
+  const dettaglio = testoCollegamenti() + (ora ? "; orologio: " + orologio : "");
+  if (titolo) return [titolo, dettaglio, COL.attFondo, COL.att];
+  return ["Dispositivi online", dettaglio, COL.okFondo, COL.ok];
+}
+
+function fascia(y, h, c) {
+  riquadro(12, y, W - 24, h, c[2]);
+  rettangolo(12, y, 6, h, c[3]);
+  font(16, true);
+  const tw = Math.min(larghezza(c[0]), (W - 60) * 0.6);
+  testo(c[0], 28, y + h / 2 + 6, tw + 1, c[3]);
+  font(13); testo(c[1], 28 + tw + 14, y + h / 2 + 5, W - 54 - tw - 14);
 }
 
 function disegna() {
@@ -608,12 +639,10 @@ function disegna() {
     if (sel) rettangolo(x + 10, hT - 4, lw - 20, 3, COL.petrolio);
     bottoni.push({ x: x, y: 0, w: lw, h: hT, azione: () => { scheda = t[0]; pagina = 0; forzaLettura = true; disegna(); leggi(); } });
   });
-  const c = condizione(), yF = hT + 6;
-  riquadro(12, yF, W - 24, 56, c[2]);
-  rettangolo(12, yF, 6, 56, c[3]);
-  font(19, true); testo(c[0], 30, yF + 25, W - 60, c[3]);
-  font(13); testo(c[1], 30, yF + 45, W - 60);
-  const y0 = yF + 66, hPiede = 58, h = H - y0 - hPiede - 8;
+  const yF = hT + 6;
+  fascia(yF, 32, condizioneProgramma());
+  fascia(yF + 36, 32, condizioneCollegamenti());
+  const y0 = yF + 76, hPiede = 58, h = H - y0 - hPiede - 8;
   riquadro(12, y0, W - 24, h, COL.pannello, COL.riga);
   if (scheda === "stato") disegnaStato(y0, h);
   else if (scheda === "parametri") disegnaParametri(y0, h);
@@ -629,7 +658,7 @@ function disegna() {
 function testoCpu() {
   const cpu = statoCpu();
   if (!cpu) return "";
-  return cpu.testo + (oraCpuErrata() ? ", orologio " + testoDifferenza(stato.cpu.differenza) : "");
+  return cpu.testo + (oraCpuErrata() ? ", orologio " + testoDifferenza(confrontoOra().diff) : "");
 }
 
 function disegnaStato(y0, h) {
@@ -649,8 +678,8 @@ function disegnaStato(y0, h) {
   const passo = Math.max(20, Math.min(40, Math.floor((h - 8) / righe.length)));
   righe.forEach((r, i) => {
     const y = y0 + Math.round(passo * 0.75) + i * passo;
-    font(13); testo(r[0], 26, y, W * 0.36, COL.tenue);
-    font(15, true); testo(r[1] || "–", 26 + W * 0.38, y, W * 0.56, r[2] ? COL.allarme : COL.inchiostro);
+    font(13); testo(r[0], 26, y, W * 0.28, COL.tenue);
+    font(15, true); testo(r[1] || "–", 26 + W * 0.30, y, W * 0.64, r[2] ? COL.allarme : COL.inchiostro);
   });
 }
 
@@ -700,12 +729,19 @@ function disegnaCpu(y0, h) {
   const fermo = !cpu || cpu.modo === "STOP" || cpu.modo === "FB" || cpu.modo === "FERMO";
   const righe = [["Stato della CPU", cpu ? cpu.testo + " (" + cpu.fonte + ")" : "", !!cpu && fermo]];
   if (c) {
-    const errata = oraCpuErrata();
+    const conf = confrontoOra(), errata = oraCpuErrata(), suReg = !!conf && conf.rif === "registratore";
+    const scarto = (d, rif) => !conf ? "–" : "CPU " + testoDifferenza(d) + (errata && conf.rif === rif ? ": date del registro sbagliate" : "");
+    const pannello = dataOra(new Date()) + (registratoreAttivo() && pannelloMenoReg !== null && Math.abs(pannelloMenoReg) > 2
+                     ? " (" + (pannelloMenoReg > 0 ? "avanti" : "indietro") + " di " + durata(pannelloMenoReg) + " sul registratore)" : "");
     righe.push(
       ["Tempo di ciclo attuale", fermo ? "– (FB fermo)" : ms(c.ciclo)],
       ["Tempo di ciclo min / max", ms(c.cicloMin) + " / " + ms(c.cicloMax)],
       ["Ora della CPU", dataOra(c.ora) + (fermo && c.ora ? " (ferma)" : "")],
-      ["Rispetto al pannello", !c.ora || fermo ? "–" : "CPU " + testoDifferenza(c.differenza) + (errata ? ": date del registro sbagliate" : ""), errata],
+      ["Ora del pannello", pannello]);
+    if (suReg) righe.push(["Rispetto al registratore", scarto(conf.diff, "registratore"), errata]);
+    righe.push(
+      ["Rispetto al pannello", !c.ora || fermo ? "–" : scarto(c.differenza, "pannello") +
+       (suReg && Math.abs(c.differenza) <= 5 && errata ? " (pannello sincronizzato col PLC?)" : ""), errata && !suReg],
       ["Tempo dall'ultimo avvio", fermo ? "–" : durata(c.secondiDaAvvio)],
       ["Numero di avvii", String(c.avvii)]);
   }
@@ -713,8 +749,8 @@ function disegnaCpu(y0, h) {
   const passo = Math.max(20, Math.min(36, Math.floor((h - (yR - y0) - hA - 8) / Math.max(righe.length, 1))));
   righe.forEach((r, i) => {
     const y = yR + Math.round(passo * 0.75) + i * passo;
-    font(13); testo(r[0], 26, y, W * 0.36, COL.tenue);
-    font(15, true); testo(r[1] || "–", 26 + W * 0.38, y, W * 0.56, r[2] ? COL.allarme : COL.inchiostro);
+    font(13); testo(r[0], 26, y, W * 0.28, COL.tenue);
+    font(15, true); testo(r[1] || "–", 26 + W * 0.30, y, W * 0.64, r[2] ? COL.allarme : COL.inchiostro);
   });
   if (self.config.cpuAzzera && c) {
     const puo = !errore && stato.abilitato && !inAttesa;

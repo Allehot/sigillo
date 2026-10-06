@@ -129,7 +129,7 @@ function crea(opz) {
 }
 
 (async () => {
-  const e = {}, v = (k, c) => { e[k] = !!c; };
+  const e = {}, v = (k, c) => { e[k] = !!c; if (!c && process.env.DEBUG) console.error(k, "::", typeof o !== "undefined" && o.testi()); };
   let t;
   const reteEsterno = { rete: [{ ip: "192.168.0.1", nome: "PLC", mac: "00:1B:1B:12:34:56", online: true, noto: true, commento: "", locale: false },
                                { ip: "192.168.0.50", nome: "", mac: "A4:5E:60:AA:BB:CC", online: true, noto: false, commento: "", locale: false },
@@ -211,7 +211,7 @@ function crea(opz) {
 
   // 6. registratore assente o con token sbagliato
   o = crea({ registratoreSpento: true }); await pausa(30); await o.ciclo(); await o.registratore();
-  v("registratore_assente", o.testi().includes("rete esterna non controllata (registratore non raggiungibile)"));
+  v("registratore_assente", o.testi().includes("registratore non raggiungibile"));
   await o.clicca("Dispositivi"); await o.clicca("Rete");
   v("rete_non_raggiungibile", o.testi().includes("Registratore non raggiungibile: errore curl 7."));
   o = crea({ tokenRegistratore: "altro" }); await pausa(30); await o.ciclo(); await o.registratore();
@@ -291,6 +291,28 @@ function crea(opz) {
   o = crea({ senzaEventi: true }); await pausa(20); await o.ciclo();
   await o.clicca("Registro");
   v("registro_non_configurato", o.testi().includes("Campo dbEventi non configurato"));
+
+  // 9b. due fasce: il programma approvato resta visibile anche con dispositivi offline
+  o = crea({}); await pausa(20); await o.ciclo(2);
+  t = o.testi();
+  v("fasce_separate", t.includes("Programma uguale a quello approvato") && t.includes("Dispositivo della macchina offline"));
+  o = crea({ prepara: db => { db[12] = (db[12] & ~2) | 8; } }); await pausa(20); await o.ciclo(2);
+  v("fasce_allarme_e_offline", o.testi().includes("Avvio automatico bloccato") && o.testi().includes("Dispositivo della macchina offline"));
+  o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
+  v("fasce_tutto_ok", o.testi().includes("Programma uguale a quello approvato") && o.testi().includes("Dispositivi online"));
+
+  // 9c. orologio: con il registratore il riferimento e' il suo PC, non il pannello (che puo' prendere l'ora dal PLC)
+  o = crea({ prepara: pnOnline, registratore: { cpu: { modo: "RUN", differenza_ora_s: -3600 } } });
+  await pausa(30); await o.registratore(); await o.ciclo(2);
+  t = o.testi();
+  v("ora_dal_registratore", t.includes("Orologio della CPU sbagliato") && t.includes("indietro di 60 min rispetto al registratore")
+    && t.includes("Programma uguale a quello approvato"));
+  await o.clicca("CPU");
+  t = o.testi();
+  v("ora_scheda_cpu", t.includes("Rispetto al registratore") && t.includes("Ora del pannello") && t.includes("(pannello sincronizzato col PLC?)"));
+  o = crea({ prepara: pnOnline, registratore: { cpu: { modo: "RUN", differenza_ora_s: 2 } } });
+  await pausa(30); await o.registratore(); await o.ciclo(2);
+  v("ora_registratore_ok", !o.testi().includes("Orologio della CPU sbagliato") && o.testi().includes("Dispositivi online"));
 
   // 10. carico del pannello: letture ridotte e nessun ridisegno se nulla cambia
   o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
