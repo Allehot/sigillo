@@ -163,9 +163,6 @@ In `config.json`:
           "noti": { "192.168.0.1": { "nome": "PLC", "mac": "" } } }
 ```
 
-`"tolleranza_ora_s": 60` è la differenza massima ammessa tra l'orologio della CPU e quello del PC del
-registratore.
-
 `pin_dispositivi` serve per approvare e commentare dalla pagina web; `token_pannello` deve essere
 uguale a `REGISTRATORE.token` nel JS Object.
 
@@ -234,9 +231,8 @@ Dettagli:
 - **Tempo di ciclo.** `RUNTIME` misura il tempo tra due chiamate del FB, quindi il ciclo dell'OB che lo
   chiama (OB1). Minimo e massimo valgono dall'ultimo avvio o dall'ultimo azzeramento; le prime due misure
   dopo l'avvio si scartano.
-- **Ora.** Il FB copia ancora l'ora della CPU nel DB (byte 1834), ma il pannello non la mostra e non la
-  controlla. Il registratore la confronta ancora con l'orologio del PC (`tolleranza_ora_s`) e la
-  annota nel registro.
+- **Ora.** Il FB copia ancora l'ora della CPU nel DB (byte 1834), ma né il pannello né il registratore
+  la mostrano o la controllano.
 - **Avvii.** Il contatore sta nel DB a ritenzione e cresce a ogni avvio. Il numero compare anche
   nell'evento 1 del registro ("avvio n. 12"). Il tempo dall'ultimo avvio è la somma dei tempi di ciclo:
   non dipende dall'orologio della CPU.
@@ -287,7 +283,7 @@ Il JS Object è scritto per pesare il meno possibile sul cMT-X:
 | 26 | Nome PROFINET non leggibile |
 | registratore | Rete: dispositivi noti online/offline, non noti collegati/scollegati, MAC diverso, approvazioni, revoche |
 | registratore | Commenti, elenco Ethernet del pannello cambiato, token o PIN errati, Syslog della CPU |
-| registratore | CPU in STOP / di nuovo in RUN, FB non in esecuzione con CPU in RUN, orologio della CPU sbagliato / di nuovo allineato |
+| registratore | CPU in STOP / di nuovo in RUN, FB non in esecuzione con CPU in RUN |
 
 ## Test
 

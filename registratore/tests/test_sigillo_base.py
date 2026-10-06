@@ -355,11 +355,11 @@ def test_decodifica_cpu():
     c = s.decodifica(sim.leggi())["cpu"]
     assert 3.5 <= c["ciclo_ms"] <= 5.0 and c["ciclo_min_ms"] <= c["ciclo_ms"] <= c["ciclo_max_ms"]
     assert c["avvii"] == 3 and 4990 <= c["secondi_da_avvio"] <= 5010
-    assert abs((s.dt.datetime.fromisoformat(c["ora"]) - s.dt.datetime.now()).total_seconds()) < 3
+    assert "ora" not in c                                                  # l'ora della CPU non si usa
     assert s.decodifica_cpu(bytearray(1822)) is None                       # DB della v2.0
 
 
-def test_cpu_run_stop_ora_e_avvii(cfg):
+def test_cpu_run_stop_e_avvii(cfg):
     reg, sim = s.Registro(cfg["registro"]), s.SorgenteSimulata()
     srv = s.Servizio(cfg, sim, reg)
     srv.ciclo()
@@ -372,18 +372,11 @@ def test_cpu_run_stop_ora_e_avvii(cfg):
     sim.modo = "RUN"
     srv.ciclo(); srv.ciclo()
     assert tipi(reg)[-1] == "CPU_RUN"
-    # orologio della CPU indietro di 10 minuti: registrato una volta, poi di nuovo allineato
-    sim.scarto_ora = -600
-    srv.ciclo(); srv.ciclo()
-    assert tipi(reg).count("ORA_CPU_ERRATA") == 1 and "indietro di 10 min" in reg.eventi(1)[0]["descrizione"]
-    assert srv.stato_cpu()["ora_errata"] and abs(srv.stato_cpu()["differenza_ora_s"] + 600) <= 2
-    sim.scarto_ora = 0
-    srv.ciclo()
-    assert tipi(reg)[-1] == "ORA_CPU_OK" and reg.verifica()["integro"]
+    assert not any(t.startswith("ORA_CPU") for t in tipi(reg)) and reg.verifica()["integro"]
     # un registratore riavviato non ripete lo stato gia' registrato
     srv2 = s.Servizio(cfg, sim, reg)
     srv2.ciclo()
-    assert tipi(reg).count("CPU_RUN") == 1 and not srv2.cpu["ora_errata"]
+    assert tipi(reg).count("CPU_RUN") == 1
 
 
 def test_vita_ferma_con_cpu_in_run(cfg):
