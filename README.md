@@ -99,8 +99,8 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | `ethStato` | `61396` | 3 |
 | `dbCpu` | `61822` | 17, facoltativo (scheda CPU) |
 | `dbEventi` | `60070` | 512, facoltativo (scheda Registro) |
-| `ioIngressi` | area **I** (ingressi), dal byte `IO.ingressi` (es. `0`) | `IO.paroleIngressi` (es. 4 = IB0..IB7), facoltativo (scheda I/O) |
-| `ioUscite` | area **Q** (uscite), dal byte `IO.uscite` (es. `0`) | `IO.paroleUscite` (es. 4 = QB0..QB7), facoltativo (scheda I/O) |
+| `ioIngressi` | area **I** (ingressi), dal byte `IO.ingressi` (es. `0`) | 64, facoltativo (scheda I/O) |
+| `ioUscite` | area **Q** (uscite), dal byte `IO.uscite` (es. `0`) | 64, facoltativo (scheda I/O) |
 | `ethMemoria` | **Local HMI**, `RW-1000` (registri ritentivi del pannello) | 192 |
 | `cmdApprova` | tag `DB_SigilloBase.Cmd.ImpostaRiferimento` | Bit |
 | `cmdSblocca` | tag `DB_SigilloBase.Cmd.SbloccaAvvio` | Bit |
@@ -132,10 +132,22 @@ nasconde un altro:
   minimo e massimo" se c'è `cpuAzzera`), tempo dall'ultimo avvio e numero di avvii. Data e ora del
   PLC non si mostrano. Vedi [Stato della CPU](#stato-della-cpu).
 - **I/O** (solo se nella Config c'è `ioIngressi` o `ioUscite`): ingressi a sinistra e uscite a destra,
-  una riga per byte e una casella per bit, verde quando il bit è a 1. Toccando una casella compaiono il
-  suo indirizzo, il nome scritto in `NOMI_IO` (es. `"I0.0": "Emergenza"`) e il valore. Ingressi e uscite
-  si leggono direttamente dalle aree I e Q della CPU, quindi **non occupano nulla nel DB**. Si leggono
-  solo con la scheda aperta (massimo 16 parole per area). Il pannello non scrive le uscite.
+  divisi per modulo, una riga per byte e una casella per bit, verde quando il bit è a 1. Si vedono
+  **solo i moduli scritti in `MODULI_IO`** in cima al JS Object, con gli indirizzi della Configurazione
+  dispositivi di TIA, per esempio:
+
+  ```js
+  const MODULI_IO = [
+    { nome: "CPU 1214C", I: [0, 2], Q: [0, 2] },          // I0.0..I1.7, Q0.0..Q1.7
+    { nome: "SM 1223 DI16/DQ16", I: [8, 2], Q: [8, 2] },  // I8.0..I9.7, Q8.0..Q9.7
+  ];
+  ```
+
+  Il pannello non può chiedere alla CPU quali moduli sono montati: con il protocollo S7 vede solo le
+  aree I e Q, che esistono per intero anche senza moduli. Per questo i moduli si scrivono qui.
+  Il pannello legge solo fino all'ultimo byte di un modulo e solo con la scheda aperta.
+  Toccando una casella compaiono il suo indirizzo, il nome scritto in `NOMI_IO`
+  (es. `"I0.0": "Emergenza"`) e il valore. Nulla nel DB, e il pannello non scrive le uscite.
 - **Registro**: gli ultimi 32 eventi del PLC (quelli del buffer `Eventi` nel DB), dal più recente, con
   numero, data e ora della CPU e descrizione (nomi dei parametri, dei dispositivi PROFINET ed Ethernet).
   Si sfoglia a pagine con "Più recenti" / "Meno recenti". Con un'altra scheda aperta, l'etichetta
@@ -293,5 +305,5 @@ python -m pytest -q tests
 ```
 
 Il banco `tests/banco_jsobject.js` esegue il JS Object con Canvas, driver, memoria RW del pannello,
-dispositivi Ethernet e registratore HTTP simulati (67 scenari, compresi il carico sul pannello, le
+dispositivi Ethernet e registratore HTTP simulati (69 scenari, compresi il carico sul pannello, le
 schede Registro e I/O e le due fasce di stato).

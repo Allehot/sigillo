@@ -12,8 +12,9 @@
  *   ethStato        assoluto, DB n byte 1396, Conteggio 3     (il pannello scrive lo stato Ethernet)
  *   dbCpu           assoluto, DB n byte 1822, Conteggio 17    (stato della CPU, facoltativo)
  *   dbEventi        assoluto, DB n byte 70,   Conteggio 512   (scheda Registro, facoltativo)
- *   ioIngressi      assoluto, area I (ingressi) dal byte IO.ingressi, Conteggio IO.paroleIngressi (scheda I/O, facoltativo)
- *   ioUscite        assoluto, area Q (uscite)   dal byte IO.uscite,   Conteggio IO.paroleUscite   (scheda I/O, facoltativo)
+ *   ioIngressi      assoluto, area I (ingressi) dal byte IO.ingressi, Conteggio 64 (scheda I/O, facoltativo)
+ *   ioUscite        assoluto, area Q (uscite)   dal byte IO.uscite,   Conteggio 64 (scheda I/O, facoltativo)
+ *                   si leggono solo i byte dei moduli scritti in MODULI_IO
  *   ethMemoria      Local HMI, RW (es. RW-1000), 16-bit Unsigned, Conteggio 192 (elenco Ethernet, ritentivo)
  *   cmdApprova      tag DB_SigilloBase.Cmd.ImpostaRiferimento   Bit
  *   cmdSblocca      tag DB_SigilloBase.Cmd.SbloccaAvvio         Bit
@@ -39,10 +40,17 @@ const NOMI_PARAMETRI = [
   "Parametro 9", "Parametro 10", "Parametro 11", "Parametro 12", "Parametro 13", "Parametro 14",
   "Parametro 15", "Parametro 16",
 ];
-// Scheda I/O: per i campi ioIngressi / ioUscite, primo byte (per le etichette I0.0, Q4.1...) e numero di
-// parole lette (= Conteggio nella Config, 1 parola = 2 byte, massimo 16); nomi facoltativi dei singoli bit. Gli ingressi e le uscite si leggono direttamente dalle aree I e Q:
-// non occupano nulla nel DB.
-const IO = { ingressi: 0, paroleIngressi: 4, uscite: 0, paroleUscite: 4 };
+// Scheda I/O. Il pannello non puo' chiedere alla CPU quali moduli sono montati (il protocollo S7 da'
+// accesso solo alle aree I e Q, che esistono tutte anche senza moduli): i moduli installati si scrivono
+// qui, con gli indirizzi della Configurazione dispositivi di TIA. I: [primo byte, numero di byte], Q idem.
+// Il pannello legge e mostra solo questi byte, divisi per modulo. Non occupano nulla nel DB.
+const MODULI_IO = [
+  { nome: "CPU", I: [0, 2], Q: [0, 2] },               // es. CPU 1214C: DI 14 (I0.0..I1.5), DQ 10 (Q0.0..Q1.1)
+  // { nome: "SM 1223 DI16/DQ16", I: [8, 2], Q: [8, 2] },
+];
+// primo byte dei campi ioIngressi / ioUscite nella Config (Conteggio 64 = 128 byte)
+const IO = { ingressi: 0, uscite: 0 };
+// nomi facoltativi dei singoli bit
 const NOMI_IO = { "I0.0": "Emergenza", "Q0.0": "Lampada allarme" };
 const FONT = "Arial";
 const SONDA_OGNI_MS = 5000, SONDA_TENTATIVI_OFFLINE = 3, REGISTRATORE_OGNI_MS = 5000;
@@ -466,8 +474,11 @@ let io = { I: null, Q: null }, ioErrore = "", ioScelto = "";
 function ioConfigurato() { return !!(self.config.ioIngressi || self.config.ioUscite); }
 async function leggiIo() {
   try {
-    for (const [k, campo, parole] of [["I", "ioIngressi", IO.paroleIngressi], ["Q", "ioUscite", IO.paroleUscite]]) {
-      if (self.config[campo]) io[k] = inByte(await leggiCampo(campo, Math.min(16, parole)));
+    for (const [k, campo, primo] of [["I", "ioIngressi", IO.ingressi], ["Q", "ioUscite", IO.uscite]]) {
+      // solo fino all'ultimo byte di un modulo installato
+      const fine = MODULI_IO.reduce((f, m) => m[k] && m[k][1] ? Math.max(f, m[k][0] + m[k][1]) : f, primo);
+      const parole = Math.min(64, Math.ceil((fine - primo) / 2));
+      if (self.config[campo] && parole > 0) io[k] = inByte(await leggiCampo(campo, parole));
     }
     ioErrore = "";
   } catch (err) {
@@ -845,30 +856,38 @@ function disegnaRegistro(y0, h) {
 }
 
 // ------------------------------------------------------------------ disegno: ingressi e uscite
-// Due colonne (ingressi, uscite): una riga per byte, 8 caselle per bit, verdi quando il bit e' a 1.
-// Toccando una casella se ne vede il nome (NOMI_IO) sotto la griglia.
+// Due colonne (ingressi, uscite): per ogni modulo di MODULI_IO il nome e una riga per byte, 8 caselle
+// per bit, verdi quando il bit e' a 1. Toccando una casella se ne vede il nome (NOMI_IO) sotto la griglia.
 function disegnaIo(y0, h) {
   if (ioErrore) { font(14); return a_capo("Ingressi e uscite non leggibili: " + ioErrore, 26, y0 + 30, W - 60, 20, COL.tenue); }
   const hInfo = 30, colW = (W - 24 - 36) / 2;
   [["I", "Ingressi", IO.ingressi], ["Q", "Uscite", IO.uscite]].forEach((a, ci) => {
-    const x0 = 30 + ci * (colW + 12), dati = io[a[0]];
+    const x0 = 30 + ci * (colW + 12), dati = io[a[0]], righe = [];
+    MODULI_IO.forEach(m => {
+      if (!m[a[0]] || !m[a[0]][1]) return;
+      righe.push({ titolo: m.nome });
+      for (let b = m[a[0]][0]; b < m[a[0]][0] + m[a[0]][1]; b++) righe.push({ byte: b });
+    });
     font(13, true); testo(a[1], x0, y0 + 20, colW, COL.tenue);
+    if (!righe.length) { font(13); testo("Nessun modulo in MODULI_IO", x0, y0 + 44, colW, COL.tenue); return; }
     if (!dati) { font(13); testo(self.config[a[0] === "I" ? "ioIngressi" : "ioUscite"] ? "Lettura…" : "Non configurate", x0, y0 + 44, colW, COL.tenue); return; }
-    const nB = dati.length, passo = Math.max(14, Math.min(30, Math.floor((h - 36 - hInfo) / Math.max(nB, 1))));
+    const passo = Math.max(14, Math.min(30, Math.floor((h - 36 - hInfo) / righe.length)));
     const lab = 44, cw = Math.min(40, Math.floor((colW - lab) / 8));
-    for (let k = 0; k < nB; k++) {
-      const y = y0 + 30 + k * passo, byte = dati[k];
-      if (y + passo > y0 + h - hInfo) break;
-      font(Math.min(13, passo - 4), true); testo(a[0] + (a[2] + k), x0, y + passo * 0.7, lab - 4, COL.tenue);
+    righe.forEach((r, k) => {
+      const y = y0 + 30 + k * passo, i = r.byte - a[2];
+      if (y + passo > y0 + h - hInfo) return;
+      if (r.titolo !== undefined) { font(Math.min(12, passo - 4)); testo(r.titolo, x0, y + passo * 0.75, colW, COL.petrolio); return; }
+      font(Math.min(13, passo - 4), true); testo(a[0] + r.byte, x0, y + passo * 0.7, lab - 4, COL.tenue);
+      if (i < 0 || i >= dati.length) { font(12); testo("fuori dalla lettura", x0 + lab, y + passo * 0.7, colW - lab, COL.att); return; }
       for (let bit = 0; bit < 8; bit++) {
-        const on = (byte >> bit) & 1, nome = a[0] + (a[2] + k) + "." + bit, x = x0 + lab + bit * cw;
+        const on = (dati[i] >> bit) & 1, nome = a[0] + r.byte + "." + bit, x = x0 + lab + bit * cw;
         riquadro(x, y + 1, cw - 3, passo - 3, on ? COL.ok : COL.bianco, ioScelto === nome ? COL.petrolio : COL.riga);
         font(Math.min(12, passo - 6)); base = "middle";
         testo(String(bit), x + (cw - 3) / 2, y + passo / 2, cw - 4, on ? COL.bianco : COL.tenue, "center");
         base = "alphabetic";
         bottoni.push({ x: x, y: y, w: cw, h: passo, azione: () => { ioScelto = nome; disegna(); } });
       }
-    }
+    });
   });
   font(13);
   let info = "Tocca un bit per vederne il nome. Solo visualizzazione: il pannello non scrive le uscite.";

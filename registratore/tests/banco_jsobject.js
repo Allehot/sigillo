@@ -31,6 +31,7 @@ function evento(db, slot, seq, tipo, indice = 0, prima = 0, dopo = 0, extra = 0)
 }
 
 function crea(opz) {
+  const js = opz.moduli ? codice.replace('{ nome: "CPU", I: [0, 2], Q: [0, 2] },', opz.moduli) : codice;
   const db = Buffer.from(fs.readFileSync(fileDb));
   const ora = new Date();                       // ora della CPU aggiornata dal FB (DTL al byte 1834)
   db.writeUInt16BE(ora.getFullYear(), 1834);
@@ -115,7 +116,7 @@ function crea(opz) {
     }
   }
   const net = { Curl: { Easy, Multi, info: { TOTAL_TIME: "T", RESPONSE_CODE: "CODICE" } } };
-  new Function("driver", "Canvas", "MouseArea", "setInterval", "net", codice)
+  new Function("driver", "Canvas", "MouseArea", "setInterval", "net", js)
     .call({ widget: { add() {} }, config }, driver, Canvas, MouseArea, f => { timer.push(f); }, net);
   return {
     db, scritture, richieste, statoReg, conta, aree, rw: () => rw, testi: () => testi.map(x => x.t).join(" | "),
@@ -314,9 +315,10 @@ function crea(opz) {
   o.aree.I[0] = 0b00000101; o.aree.Q[1] = 0b10000000;
   await o.clicca("I/O");
   t = o.testi();
-  v("io_griglia", t.includes("Ingressi") && t.includes("Uscite") && t.includes("I0") && t.includes("I7") && t.includes("Q1"));
+  v("io_solo_moduli", t.includes("Ingressi") && t.includes("Uscite") && t.includes("CPU") && t.includes(" | I1 | ")
+    && t.includes(" | Q1 | ") && !t.includes(" | I2 | ") && !t.includes(" | Q2 | "));
   const c1 = o.conta.io; await o.ciclo();
-  v("io_letti_con_scheda", o.conta.io - c1 === 8);
+  v("io_letti_solo_byte_moduli", o.conta.io - c1 === 2);
   // la casella del bit I0.0 e' la prima con testo "0" dopo l'etichetta I0
   const tocca = async (riga, bit) => { const L = o.testi().split(" | "); const i = L.indexOf(riga); await o.clicca2(i + 1 + bit); };
   await tocca("I0", 0);
@@ -326,6 +328,15 @@ function crea(opz) {
   await tocca("Q1", 7);
   v("io_uscita", o.testi().includes("Q1.7: 1 (attivo)"));
   v("io_nessuna_scrittura", !o.scritture.some(a => a.area));
+  // modulo di ampliamento: si mostrano anche i suoi byte, e si legge fino al suo ultimo byte
+  o = crea({ prepara: pnOnline, io: true, moduli: '{ nome: "CPU", I: [0, 2], Q: [0, 2] },\n  { nome: "SM 1223", I: [8, 2], Q: [8, 1] },' });
+  await pausa(20); await o.ciclo(); o.aree.I[9] = 0b1;
+  await o.clicca("I/O");
+  t = o.testi();
+  v("io_modulo_aggiuntivo", t.includes("SM 1223") && t.includes(" | I8 | ") && t.includes(" | I9 | ") && t.includes(" | Q8 | ")
+    && !t.includes(" | Q9 | ") && !t.includes(" | I2 | "));
+  const c2 = o.conta.io; await o.ciclo();
+  v("io_letti_fino_al_modulo", o.conta.io - c2 === 5 + 5);
 
   // 10. carico del pannello: letture ridotte e nessun ridisegno se nulla cambia
   o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
