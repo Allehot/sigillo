@@ -99,8 +99,8 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | `ethStato` | `61396` | 3 |
 | `dbCpu` | `61822` | 17, facoltativo (scheda CPU) |
 | `dbEventi` | `60070` | 512, facoltativo (scheda Registro) |
-| `ioIngressi` | area **I** (ingressi), dal byte `IO.ingressi` (es. `0`) | 64, facoltativo (scheda I/O) |
-| `ioUscite` | area **Q** (uscite), dal byte `IO.uscite` (es. `0`) | 64, facoltativo (scheda I/O) |
+| `ioIngressi` | area **I** (ingressi), parola `IW0` | parole fino all'ultimo canale di `IO.moduli` (es. 34 con gli analogici a IW64), facoltativo |
+| `ioUscite` | area **Q** (uscite), parola `QW0` | parole fino all'ultimo canale di `IO.moduli` (es. 1 con 10 uscite), facoltativo |
 | `ethMemoria` | **Local HMI**, `RW-1000` (registri ritentivi del pannello) | 192 |
 | `cmdApprova` | tag `DB_SigilloBase.Cmd.ImpostaRiferimento` | Bit |
 | `cmdSblocca` | tag `DB_SigilloBase.Cmd.SbloccaAvvio` | Bit |
@@ -131,23 +131,27 @@ nasconde un altro:
 - **CPU**: RUN/STOP con la sua fonte, tempo di ciclo attuale, minimo e massimo (pulsante "Azzera
   minimo e massimo" se c'è `cpuAzzera`), tempo dall'ultimo avvio e numero di avvii. Data e ora del
   PLC non si mostrano. Vedi [Stato della CPU](#stato-della-cpu).
-- **I/O** (solo se nella Config c'è `ioIngressi` o `ioUscite`): ingressi a sinistra e uscite a destra,
-  divisi per modulo, una riga per byte e una casella per bit, verde quando il bit è a 1. Si vedono
-  **solo i moduli scritti in `MODULI_IO`** in cima al JS Object, con gli indirizzi della Configurazione
-  dispositivi di TIA, per esempio:
+- **I/O** (solo se nella Config c'è `ioIngressi` o `ioUscite`): come nella prima versione, un blocco
+  per ogni modulo scritto in `IO.moduli` in cima al JS Object, con nome e indirizzi (es. "I0.0 - I1.5").
+  I digitali sono LED, 16 per riga, verdi a 1, solo per i canali del modulo; gli analogici hanno una
+  riga per canale con valore grezzo, valore in scala (0..27648 = `min`..`max`) e barra. Se i moduli non
+  stanno in una pagina si sfogliano con "<" / ">". Per esempio, CPU 1214C con un modulo di ampliamento:
 
   ```js
-  const MODULI_IO = [
-    { nome: "CPU 1214C", I: [0, 2], Q: [0, 2] },          // I0.0..I1.7, Q0.0..Q1.7
-    { nome: "SM 1223 DI16/DQ16", I: [8, 2], Q: [8, 2] },  // I8.0..I9.7, Q8.0..Q9.7
-  ];
+  const IO = {
+    moduli: [
+      { nome: "CPU - ingressi digitali", area: "I", byte: 0, bit: 14 },
+      { nome: "CPU - uscite digitali", area: "Q", byte: 0, bit: 10 },
+      { nome: "CPU - ingressi analogici", area: "AI", indirizzo: 64, canali: 2, scala: { min: 0, max: 10, unita: "V" } },
+      { nome: "SM 1223 DI16/DQ16", area: "I", byte: 8, bit: 16 },
+    ],
+    simboli: { "I0.0": "Fungo emergenza", "Q0.0": "Lampada rossa", "IW64": "Pressione" },
+  };
   ```
 
-  Il pannello non può chiedere alla CPU quali moduli sono montati: con il protocollo S7 vede solo le
-  aree I e Q, che esistono per intero anche senza moduli. Per questo i moduli si scrivono qui.
-  Il pannello legge solo fino all'ultimo byte di un modulo e solo con la scheda aperta.
-  Toccando una casella compaiono il suo indirizzo, il nome scritto in `NOMI_IO`
-  (es. `"I0.0": "Emergenza"`) e il valore. Nulla nel DB, e il pannello non scrive le uscite.
+  Il pannello legge le aree I e Q dal byte 0 fino all'ultimo canale configurato, solo con la scheda
+  aperta; se la lettura non riesce, la scheda dice quale Conteggio mettere nella Config. Toccando un
+  LED compaiono indirizzo, simbolo e valore. Nulla nel DB, e il pannello non scrive le uscite.
 - **Registro**: gli ultimi 32 eventi del PLC (quelli del buffer `Eventi` nel DB), dal più recente, con
   numero, data e ora della CPU e descrizione (nomi dei parametri, dei dispositivi PROFINET ed Ethernet).
   Si sfoglia a pagine con "Più recenti" / "Meno recenti". Con un'altra scheda aperta, l'etichetta

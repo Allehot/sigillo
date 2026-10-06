@@ -12,9 +12,9 @@
  *   ethStato        assoluto, DB n byte 1396, Conteggio 3     (il pannello scrive lo stato Ethernet)
  *   dbCpu           assoluto, DB n byte 1822, Conteggio 17    (stato della CPU, facoltativo)
  *   dbEventi        assoluto, DB n byte 70,   Conteggio 512   (scheda Registro, facoltativo)
- *   ioIngressi      assoluto, area I (ingressi) dal byte IO.ingressi, Conteggio 64 (scheda I/O, facoltativo)
- *   ioUscite        assoluto, area Q (uscite)   dal byte IO.uscite,   Conteggio 64 (scheda I/O, facoltativo)
- *                   si leggono solo i byte dei moduli scritti in MODULI_IO
+ *   ioIngressi      area ingressi (I), parola IW0, 16-bit Unsigned, Conteggio = parole indicate nella scheda I/O
+ *   ioUscite        area uscite (Q), parola QW0, 16-bit Unsigned, Conteggio = parole indicate nella scheda I/O
+ *                   (scheda I/O, facoltativi: si leggono dal byte 0 all'ultimo canale dei moduli in IO.moduli)
  *   ethMemoria      Local HMI, RW (es. RW-1000), 16-bit Unsigned, Conteggio 192 (elenco Ethernet, ritentivo)
  *   cmdApprova      tag DB_SigilloBase.Cmd.ImpostaRiferimento   Bit
  *   cmdSblocca      tag DB_SigilloBase.Cmd.SbloccaAvvio         Bit
@@ -40,18 +40,18 @@ const NOMI_PARAMETRI = [
   "Parametro 9", "Parametro 10", "Parametro 11", "Parametro 12", "Parametro 13", "Parametro 14",
   "Parametro 15", "Parametro 16",
 ];
-// Scheda I/O. Il pannello non puo' chiedere alla CPU quali moduli sono montati (il protocollo S7 da'
-// accesso solo alle aree I e Q, che esistono tutte anche senza moduli): i moduli installati si scrivono
-// qui, con gli indirizzi della Configurazione dispositivi di TIA. I: [primo byte, numero di byte], Q idem.
-// Il pannello legge e mostra solo questi byte, divisi per modulo. Non occupano nulla nel DB.
-const MODULI_IO = [
-  { nome: "CPU", I: [0, 2], Q: [0, 2] },               // es. CPU 1214C: DI 14 (I0.0..I1.5), DQ 10 (Q0.0..Q1.1)
-  // { nome: "SM 1223 DI16/DQ16", I: [8, 2], Q: [8, 2] },
-];
-// primo byte dei campi ioIngressi / ioUscite nella Config (Conteggio 64 = 128 byte)
-const IO = { ingressi: 0, uscite: 0 };
-// nomi facoltativi dei singoli bit
-const NOMI_IO = { "I0.0": "Emergenza", "Q0.0": "Lampada allarme" };
+// Scheda I/O: i moduli della macchina con gli indirizzi della Configurazione dispositivi di TIA.
+// Digitali: area "I" o "Q", primo byte e numero di canali. Analogici: area "AI" o "AQ", indirizzo della
+// prima parola, numero di canali e scala facoltativa (0..27648 = min..max). Non occupano nulla nel DB.
+const IO = {
+  moduli: [
+    { nome: "CPU - ingressi digitali", area: "I", byte: 0, bit: 14 },
+    { nome: "CPU - uscite digitali", area: "Q", byte: 0, bit: 10 },
+    { nome: "CPU - ingressi analogici", area: "AI", indirizzo: 64, canali: 2, scala: { min: 0, max: 10, unita: "V" } },
+    // { nome: "SM 1221 DI16", area: "I", byte: 8, bit: 16 },
+  ],
+  simboli: { "I0.0": "Fungo emergenza", "Q0.0": "Lampada rossa" },
+};
 const FONT = "Arial";
 const SONDA_OGNI_MS = 5000, SONDA_TENTATIVI_OFFLINE = 3, REGISTRATORE_OGNI_MS = 5000;
 
@@ -470,20 +470,38 @@ function coloreEvento(t) {
 
 // ------------------------------------------------------------------ ingressi e uscite
 // Letti solo con la scheda I/O aperta, a ogni ciclo. Solo visualizzazione: il pannello non scrive le uscite.
-let io = { I: null, Q: null }, ioErrore = "", ioScelto = "";
+let io = { I: null, Q: null }, ioErrore = "", ioSelezione = "", ioPagina = 0;
 function ioConfigurato() { return !!(self.config.ioIngressi || self.config.ioUscite); }
+// Byte necessari in un'area: dal byte 0 fino all'ultimo canale dei moduli configurati
+function byteArea(area) {
+  let fine = 0;
+  IO.moduli.forEach(m => {
+    if (m.area === area) fine = Math.max(fine, m.byte + Math.ceil(m.bit / 8));
+    if (m.area === "A" + area) fine = Math.max(fine, m.indirizzo + 2 * m.canali);
+  });
+  return fine;
+}
+function paroleArea(area) { return Math.ceil(byteArea(area) / 2); }
 async function leggiIo() {
   try {
-    for (const [k, campo, primo] of [["I", "ioIngressi", IO.ingressi], ["Q", "ioUscite", IO.uscite]]) {
-      // solo fino all'ultimo byte di un modulo installato
-      const fine = MODULI_IO.reduce((f, m) => m[k] && m[k][1] ? Math.max(f, m[k][0] + m[k][1]) : f, primo);
-      const parole = Math.min(64, Math.ceil((fine - primo) / 2));
-      if (self.config[campo] && parole > 0) io[k] = inByte(await leggiCampo(campo, parole));
-    }
+    const nI = paroleArea("I"), nQ = paroleArea("Q");
+    if (self.config.ioIngressi && nI) io.I = inByte(await leggiCampo("ioIngressi", nI));
+    if (self.config.ioUscite && nQ) io.Q = inByte(await leggiCampo("ioUscite", nQ));
     ioErrore = "";
   } catch (err) {
     ioErrore = (err && err.message) || String(err);
   }
+}
+// null = area non letta
+function bitIo(area, by, bi) {
+  const b = io[area];
+  return !b || by >= b.length ? null : (b[by] >> bi) & 1;
+}
+function analogicoIo(area, ind) {
+  const b = io[area];
+  if (!b || ind + 1 >= b.length) return null;
+  const v = (b[ind] << 8) | b[ind + 1];
+  return v > 32767 ? v - 65536 : v;
 }
 
 // ------------------------------------------------------------------ disegno: strumenti
@@ -856,47 +874,80 @@ function disegnaRegistro(y0, h) {
 }
 
 // ------------------------------------------------------------------ disegno: ingressi e uscite
-// Due colonne (ingressi, uscite): per ogni modulo di MODULI_IO il nome e una riga per byte, 8 caselle
-// per bit, verdi quando il bit e' a 1. Toccando una casella se ne vede il nome (NOMI_IO) sotto la griglia.
+// Un blocco per modulo di IO.moduli, a pagine: digitali come LED (16 per riga, verdi a 1), analogici
+// una riga per canale con valore grezzo, valore in scala e barra. Toccando un LED se ne vede il simbolo.
+function altezzaModulo(m) { return 26 + (m.area === "I" || m.area === "Q" ? Math.ceil(m.bit / 16) * 50 : m.canali * 28); }
+function intervalloModulo(m) {
+  if (m.area === "I" || m.area === "Q") return m.area + m.byte + ".0 - " + m.area + (m.byte + Math.floor((m.bit - 1) / 8)) + "." + ((m.bit - 1) % 8);
+  const p = m.area === "AI" ? "IW" : "QW";
+  return p + m.indirizzo + " - " + p + (m.indirizzo + 2 * (m.canali - 1));
+}
 function disegnaIo(y0, h) {
-  if (ioErrore) { font(14); return a_capo("Ingressi e uscite non leggibili: " + ioErrore, 26, y0 + 30, W - 60, 20, COL.tenue); }
-  const hInfo = 30, colW = (W - 24 - 36) / 2;
-  [["I", "Ingressi", IO.ingressi], ["Q", "Uscite", IO.uscite]].forEach((a, ci) => {
-    const x0 = 30 + ci * (colW + 12), dati = io[a[0]], righe = [];
-    MODULI_IO.forEach(m => {
-      if (!m[a[0]] || !m[a[0]][1]) return;
-      righe.push({ titolo: m.nome });
-      for (let b = m[a[0]][0]; b < m[a[0]][0] + m[a[0]][1]; b++) righe.push({ byte: b });
-    });
-    font(13, true); testo(a[1], x0, y0 + 20, colW, COL.tenue);
-    if (!righe.length) { font(13); testo("Nessun modulo in MODULI_IO", x0, y0 + 44, colW, COL.tenue); return; }
-    if (!dati) { font(13); testo(self.config[a[0] === "I" ? "ioIngressi" : "ioUscite"] ? "Lettura…" : "Non configurate", x0, y0 + 44, colW, COL.tenue); return; }
-    const passo = Math.max(14, Math.min(30, Math.floor((h - 36 - hInfo) / righe.length)));
-    const lab = 44, cw = Math.min(40, Math.floor((colW - lab) / 8));
-    righe.forEach((r, k) => {
-      const y = y0 + 30 + k * passo, i = r.byte - a[2];
-      if (y + passo > y0 + h - hInfo) return;
-      if (r.titolo !== undefined) { font(Math.min(12, passo - 4)); testo(r.titolo, x0, y + passo * 0.75, colW, COL.petrolio); return; }
-      font(Math.min(13, passo - 4), true); testo(a[0] + r.byte, x0, y + passo * 0.7, lab - 4, COL.tenue);
-      if (i < 0 || i >= dati.length) { font(12); testo("fuori dalla lettura", x0 + lab, y + passo * 0.7, colW - lab, COL.att); return; }
-      for (let bit = 0; bit < 8; bit++) {
-        const on = (dati[i] >> bit) & 1, nome = a[0] + r.byte + "." + bit, x = x0 + lab + bit * cw;
-        riquadro(x, y + 1, cw - 3, passo - 3, on ? COL.ok : COL.bianco, ioScelto === nome ? COL.petrolio : COL.riga);
-        font(Math.min(12, passo - 6)); base = "middle";
-        testo(String(bit), x + (cw - 3) / 2, y + passo / 2, cw - 4, on ? COL.bianco : COL.tenue, "center");
-        base = "alphabetic";
-        bottoni.push({ x: x, y: y, w: cw, h: passo, azione: () => { ioScelto = nome; disegna(); } });
-      }
-    });
-  });
-  font(13);
-  let info = "Tocca un bit per vederne il nome. Solo visualizzazione: il pannello non scrive le uscite.";
-  if (ioScelto) {
-    const area = io[ioScelto[0]], m = /^[IQ](\d+)\.(\d)$/.exec(ioScelto), k = +m[1] - (ioScelto[0] === "I" ? IO.ingressi : IO.uscite);
-    const val = area && k < area.length ? (area[k] >> +m[2]) & 1 : null;
-    info = ioScelto + (NOMI_IO[ioScelto] ? " " + NOMI_IO[ioScelto] : "") + ": " + (val === null ? "–" : val ? "1 (attivo)" : "0");
+  const hInfo = 34, utile = h - hInfo - 8;
+  if (!IO.moduli.length) { font(14); testo("Nessun modulo configurato: compila IO.moduli in cima al JS Object.", 24, y0 + 30, W - 60, COL.tenue); return; }
+  if (ioErrore) {
+    font(14); testo("Lettura degli I/O non riuscita: " + ioErrore, 24, y0 + 30, W - 60, COL.allarme);
+    font(13); testo("Config: ioIngressi (IW0) con Conteggio " + paroleArea("I") + ", ioUscite (QW0) con Conteggio " + paroleArea("Q") + ".",
+                    24, y0 + 54, W - 60, COL.tenue);
+    return;
   }
-  testo(info, 26, y0 + h - 10, W - 60, ioScelto ? COL.inchiostro : COL.tenue);
+  // pagine: si riempie lo spazio disponibile un modulo dopo l'altro
+  const pagine = [[]];
+  let occupato = 0;
+  IO.moduli.forEach(m => {
+    const hm = altezzaModulo(m) + 8;
+    if (occupato + hm > utile && pagine[pagine.length - 1].length) { pagine.push([]); occupato = 0; }
+    pagine[pagine.length - 1].push(m); occupato += hm;
+  });
+  ioPagina = Math.min(ioPagina, pagine.length - 1);
+  const passo = Math.min(44, Math.floor((W - 48) / 16)), led = passo - 6;
+  let y = y0 + 8;
+  pagine[ioPagina].forEach(m => {
+    font(14, true); testo(m.nome, 24, y + 16, W * 0.6, COL.inchiostro);
+    font(12); testo(intervalloModulo(m), W * 0.62, y + 16, W * 0.34, COL.tenue);
+    y += 26;
+    if (m.area === "I" || m.area === "Q") {
+      for (let k = 0; k < m.bit; k++) {
+        const by = m.byte + Math.floor(k / 8), bi = k % 8, ind = m.area + by + "." + bi, on = bitIo(m.area, by, bi) === 1;
+        const x = 24 + (k % 16) * passo, yy = y + Math.floor(k / 16) * 50, sel = ioSelezione === ind;
+        if (sel) riquadro(x - 2, yy - 2, led + 4, led + 4, COL.pannello, COL.petrolio);
+        riquadro(x, yy, led, led, on ? COL.ok : COL.bianco, sel ? COL.petrolio : on ? COL.ok : COL.riga);
+        font(11, true); base = "middle";
+        testo(by + "." + bi, x + led / 2, yy + led / 2, led - 2, on ? COL.bianco : COL.tenue, "center");
+        base = "alphabetic";
+        bottoni.push({ x: x, y: yy, w: led, h: led, azione: () => { ioSelezione = ind; disegna(); } });
+      }
+      y += Math.ceil(m.bit / 16) * 50;
+    } else {
+      const area = m.area === "AI" ? "I" : "Q", p = m.area === "AI" ? "IW" : "QW";
+      for (let c = 0; c < m.canali; c++) {
+        const ind = p + (m.indirizzo + 2 * c), v = analogicoIo(area, m.indirizzo + 2 * c);
+        const sc = m.scala && v !== null ? m.scala.min + (m.scala.max - m.scala.min) * v / 27648 : null;
+        font(13, true); testo(ind, 24, y + 18, 70, COL.inchiostro);
+        font(13); testo(IO.simboli[ind] || "", 100, y + 18, W * 0.28, COL.tenue);
+        testo(v === null ? "–" : String(v), W * 0.42, y + 18, W * 0.11, COL.inchiostro);
+        if (sc !== null) testo(numero(sc) + " " + (m.scala.unita || ""), W * 0.54, y + 18, W * 0.15, COL.inchiostro);
+        const xb = W * 0.70, wb = W * 0.26, f = v === null ? 0 : Math.max(0, Math.min(1, v / 27648));
+        riquadro(xb, y + 6, wb, 14, COL.bianco, COL.riga);
+        if (f > 0) rettangolo(xb + 1, y + 7, (wb - 2) * f, 12, COL.petrolio);
+        y += 28;
+      }
+    }
+    y += 8;
+  });
+  // riga informativa: segnale selezionato, pagine
+  const yI = y0 + h - hInfo + 4;
+  font(13);
+  if (ioSelezione) {
+    const parti = ioSelezione.slice(1).split("."), v = bitIo(ioSelezione[0], +parti[0], +parti[1]);
+    testo(ioSelezione + (IO.simboli[ioSelezione] ? "  " + IO.simboli[ioSelezione] : "") + "  =  " + (v === null ? "–" : v),
+          24, yI + 14, W * 0.6, COL.inchiostro);
+  } else testo("Sola lettura. Tocca un LED per vedere nome e stato del segnale.", 24, yI + 14, W * 0.6, COL.tenue);
+  if (pagine.length > 1) {
+    bottone(W - 220, yI - 6, 60, 28, "<", () => { ioPagina = Math.max(0, ioPagina - 1); disegna(); }, { disattivo: ioPagina === 0 });
+    font(13); testo((ioPagina + 1) + " / " + pagine.length, W - 130, yI + 13, 50, COL.tenue, "center");
+    bottone(W - 92, yI - 6, 60, 28, ">", () => { ioPagina = Math.min(pagine.length - 1, ioPagina + 1); disegna(); }, { disattivo: ioPagina === pagine.length - 1 });
+  }
 }
 
 function disegnaPiede(yP) {

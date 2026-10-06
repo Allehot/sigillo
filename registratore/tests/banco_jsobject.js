@@ -31,7 +31,7 @@ function evento(db, slot, seq, tipo, indice = 0, prima = 0, dopo = 0, extra = 0)
 }
 
 function crea(opz) {
-  const js = opz.moduli ? codice.replace('{ nome: "CPU", I: [0, 2], Q: [0, 2] },', opz.moduli) : codice;
+  const js = opz.moduli ? codice.replace('// { nome: "SM 1221 DI16", area: "I", byte: 8, bit: 16 },', opz.moduli) : codice;
   const db = Buffer.from(fs.readFileSync(fileDb));
   const ora = new Date();                       // ora della CPU aggiornata dal FB (DTL al byte 1834)
   db.writeUInt16BE(ora.getFullYear(), 1834);
@@ -56,7 +56,7 @@ function crea(opz) {
   if (opz.senzaCpu) { delete config.dbCpu; delete config.cpuAzzera; }
   if (opz.senzaEventi) delete config.dbEventi;
   if (opz.io) Object.assign(config, { ioIngressi: { area: "I" }, ioUscite: { area: "Q" } });
-  const aree = { I: Buffer.alloc(32), Q: Buffer.alloc(32) };     // immagine di processo simulata
+  const aree = { I: Buffer.alloc(160), Q: Buffer.alloc(160) };     // immagine di processo simulata
   if (opz.diviso) Object.assign(config, { dbPn2: { byte: 1488 }, dbPn3: { byte: 1612 }, dbPn4: { byte: 1736 }, dbEst2: { byte: 1218 }, dbEst3: { byte: 1342 } });
   if (opz.diviso) for (let k = 2; k <= 9; k++) config["dbEventi" + k] = { byte: 70 + (k - 1) * 124 };
   if (opz.abilita !== undefined) config.abilitaComandi = { lb: true };
@@ -312,31 +312,40 @@ function crea(opz) {
   v("io_scheda_nascosta", !o.testi().includes("I/O"));
   o = crea({ prepara: pnOnline, io: true }); await pausa(20); await o.ciclo(2);
   v("io_non_letti_fuori_scheda", o.conta.io === 0);
-  o.aree.I[0] = 0b00000101; o.aree.Q[1] = 0b10000000;
+  o.aree.I[0] = 0b00000101; o.aree.Q[1] = 0b00000010; o.aree.I.writeInt16BE(13824, 64);
   await o.clicca("I/O");
   t = o.testi();
-  v("io_solo_moduli", t.includes("Ingressi") && t.includes("Uscite") && t.includes("CPU") && t.includes(" | I1 | ")
-    && t.includes(" | Q1 | ") && !t.includes(" | I2 | ") && !t.includes(" | Q2 | "));
+  // come in v2.0: un blocco per modulo, i canali esatti (14 DI = I0.0..I1.5, 10 DQ = Q0.0..Q1.1)
+  v("io_moduli", t.includes("CPU - ingressi digitali") && t.includes("I0.0 - I1.5") && t.includes("CPU - uscite digitali")
+    && t.includes("Q0.0 - Q1.1") && t.includes("1 / 2"));
+  const L = t.split(" | ");
+  v("io_canali_esatti", L.includes("1.5") && !L.includes("1.6") && L.filter(x => x === "1.1").length === 2 && L.filter(x => x === "1.2").length === 1);
+  await o.clicca(">");
+  t = o.testi();
+  v("io_analogico_in_scala", t.includes("CPU - ingressi analogici") && t.includes("IW64 - IW66") && t.includes("13824") && t.includes("5 V")
+    && t.includes("2 / 2") && !t.includes("CPU - ingressi digitali"));
+  await o.clicca("<");
   const c1 = o.conta.io; await o.ciclo();
-  v("io_letti_solo_byte_moduli", o.conta.io - c1 === 2);
-  // la casella del bit I0.0 e' la prima con testo "0" dopo l'etichetta I0
-  const tocca = async (riga, bit) => { const L = o.testi().split(" | "); const i = L.indexOf(riga); await o.clicca2(i + 1 + bit); };
-  await tocca("I0", 0);
-  v("io_nome_e_valore", o.testi().includes("I0.0 Emergenza: 1 (attivo)"));
-  await tocca("I0", 1);
-  v("io_bit_spento", o.testi().includes("I0.1: 0"));
-  await tocca("Q1", 7);
-  v("io_uscita", o.testi().includes("Q1.7: 1 (attivo)"));
+  v("io_letti_fino_ultimo_canale", o.conta.io - c1 === 34 + 1);
+  await o.clicca2(L.indexOf("0.0"));
+  v("io_simbolo_e_valore", o.testi().includes("I0.0  Fungo emergenza  =  1"));
+  await o.clicca2(o.testi().split(" | ").indexOf("0.1"));
+  v("io_bit_spento", o.testi().includes("I0.1  =  0"));
+  await o.clicca2(o.testi().split(" | ").lastIndexOf("1.1"));
+  v("io_uscita", o.testi().includes("Q1.1  =  1"));
   v("io_nessuna_scrittura", !o.scritture.some(a => a.area));
-  // modulo di ampliamento: si mostrano anche i suoi byte, e si legge fino al suo ultimo byte
-  o = crea({ prepara: pnOnline, io: true, moduli: '{ nome: "CPU", I: [0, 2], Q: [0, 2] },\n  { nome: "SM 1223", I: [8, 2], Q: [8, 1] },' });
-  await pausa(20); await o.ciclo(); o.aree.I[9] = 0b1;
+  // moduli di ampliamento: si va a pagine e si legge fino all'ultimo canale configurato
+  o = crea({ prepara: pnOnline, io: true, moduli: [8, 12, 16, 20].map(b => '{ nome: "SM 1221 DI32 n' + b + '", area: "I", byte: ' + b + ', bit: 32 },').join("\n    ")
+    + '\n    { nome: "SM 1232 AQ4", area: "AQ", indirizzo: 96, canali: 4, scala: { min: 0, max: 20, unita: "mA" } },' });
+  await pausa(20); await o.ciclo(); o.aree.I[23] = 0x80;
   await o.clicca("I/O");
   t = o.testi();
-  v("io_modulo_aggiuntivo", t.includes("SM 1223") && t.includes(" | I8 | ") && t.includes(" | I9 | ") && t.includes(" | Q8 | ")
-    && !t.includes(" | Q9 | ") && !t.includes(" | I2 | "));
+  v("io_pagine", t.includes("1 / 6") && t.includes("CPU - ingressi digitali") && !t.includes("SM 1232 AQ4"));
   const c2 = o.conta.io; await o.ciclo();
-  v("io_letti_fino_al_modulo", o.conta.io - c2 === 5 + 5);
+  v("io_letti_con_ampliamenti", o.conta.io - c2 === 34 + 52);
+  for (let k = 0; k < 6; k++) await o.clicca(">").catch(() => {});
+  t = o.testi();
+  v("io_ultima_pagina", t.includes("6 / 6") && t.includes("SM 1232 AQ4") && t.includes("QW96 - QW102") && !t.includes("CPU - ingressi digitali"));
 
   // 10. carico del pannello: letture ridotte e nessun ridisegno se nulla cambia
   o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
