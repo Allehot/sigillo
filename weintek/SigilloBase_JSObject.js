@@ -1,5 +1,5 @@
 /*
- * Sigillo Base v2.1 – JS Object per pannelli Weintek cMT-X (EasyBuilder Pro 6.05.02 o successivo)
+ * Sigillo Base v2.2 – JS Object per pannelli Weintek cMT-X (EasyBuilder Pro 6.05.02 o successivo)
  *
  * Il PLC contiene solo stato, eventi, parametri, hardware e dispositivi PROFINET.
  * L'elenco dei dispositivi Ethernet sta nella memoria del pannello; elenco della rete, MAC,
@@ -11,6 +11,7 @@
  *   dbPn            assoluto, DB n byte 1364, Conteggio 229   (PROFINET e nomi)
  *   ethStato        assoluto, DB n byte 1396, Conteggio 3     (il pannello scrive lo stato Ethernet)
  *   dbCpu           assoluto, DB n byte 1822, Conteggio 17    (stato della CPU, facoltativo)
+ *   dbEventi        assoluto, DB n byte 70,   Conteggio 512   (scheda Registro, facoltativo)
  *   ethMemoria      Local HMI, RW (es. RW-1000), 16-bit Unsigned, Conteggio 192 (elenco Ethernet, ritentivo)
  *   cmdApprova      tag DB_SigilloBase.Cmd.ImpostaRiferimento   Bit
  *   cmdSblocca      tag DB_SigilloBase.Cmd.SbloccaAvvio         Bit
@@ -18,7 +19,10 @@
  *   cpuAzzera       tag DB_SigilloBase.Cpu.AzzeraCiclo          Bit (facoltativo)
  *   abilitaComandi  bit interno, es. LB-9000 (facoltativo): a 1 solo con amministratore loggato
  * Se il driver non legge un blocco lungo, dividilo in pezzi da 62 parole: campo2, campo3...
- * (es. dbPn2 dal byte 1488, dbPn3 dal 1612, dbPn4 dal 1736).
+ * (es. dbPn2 dal byte 1488, dbPn3 dal 1612, dbPn4 dal 1736; dbEventi2 dal 194, ... dbEventi9 dal 1062).
+ *
+ * Carico sul pannello: ogni secondo si leggono solo dbStato e i primi 20 word di dbPn; il resto ogni
+ * 10 s o quando la scheda aperta lo mostra. Il Canvas si ridisegna solo se qualcosa e' cambiato.
  *
  * RUN / STOP: il pannello lo deduce dal contatore di vita (fermo = CPU in STOP o FB non chiamato)
  * e lo riceve preciso dal registratore, che lo legge dalla CPU con snap7, quando e' raggiungibile.
@@ -45,7 +49,7 @@ function blocchi(campo, inizio, parole) {
   return out;
 }
 const BLOCCHI = { stato: blocchi("dbStato", 0, 35), est: blocchi("dbEst", 1094, 135), pn: blocchi("dbPn", 1364, 229),
-                  cpu: blocchi("dbCpu", 1822, 17) };
+                  cpu: blocchi("dbCpu", 1822, 17), eventi: blocchi("dbEventi", 70, 512) };
 const COL = {
   fondo: "#E8ECEF", pannello: "#F8FAFB", inchiostro: "#15212B", tenue: "#56646F", riga: "#C9D1D8",
   petrolio: "#0A5F63", ok: "#1D7446", okFondo: "#E3F0E8", allarme: "#B3261E", allarmeFondo: "#F6E1DF",
@@ -79,6 +83,7 @@ function hex(b, o, n) {
   return s;
 }
 function i32(b, o) { return (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]; }
+function i16(b, o) { return ((b[o] << 8) | b[o + 1]) << 16 >> 16; }
 function f32(b, o) { return new DataView(b.buffer, b.byteOffset + o, 4).getFloat32(0, false); }
 function stringa(b, o) {
   let s = "";
@@ -117,7 +122,7 @@ function decodifica(b, e, p, abilitato) {
   }
   const st = b[12];
   return {
-    vita: i32(b, 0),
+    vita: i32(b, 0), seq: i32(b, 4),
     cmdApprova: (b[10] & 1) !== 0, cmdSblocca: (b[10] & 2) !== 0,
     riferimentoValido: (st & 1) !== 0, checksumOk: (st & 2) !== 0, firmaFOk: (st & 4) !== 0,
     avvioBloccato: (st & 8) !== 0, erroreLettura: (st & 16) !== 0, hwOk: (st & 32) !== 0,
@@ -154,18 +159,30 @@ async function leggiArea(blocchi) {
   return inByte(await leggiCampo(blocchi[0][0], blocchi[0][1]));
 }
 
+// Ogni secondo si legge solo quello che cambia o che la scheda aperta mostra: stato (35 parole) e
+// stato PROFINET (20). Parametri, nomi PROFINET e CPU si rileggono ogni LETTURA_LENTA cicli, oppure a
+// ogni ciclo quando la scheda aperta li mostra.
+const LETTURA_LENTA = 10;
+let cicli = 0, forzaLettura = false, ultE = null, ultP = null, ultCpu = null, nomiPnFino = 0;
 async function leggi() {
   if (lettura) return;
   lettura = true;
   try {
+    const lenta = forzaLettura || cicli % LETTURA_LENTA === 0;
+    forzaLettura = false;
+    cicli += 1;
     const b = await leggiArea(BLOCCHI.stato);
-    const e = await leggiArea(BLOCCHI.est);
-    const p = self.config.dbPn ? await leggiArea(BLOCCHI.pn) : new Uint8Array(458);
-    const c = self.config.dbCpu ? await leggiArea(BLOCCHI.cpu) : null;
+    if (lenta || !ultE || scheda === "stato" || scheda === "parametri") ultE = await leggiArea(BLOCCHI.est);
+    if (!self.config.dbPn) ultP = new Uint8Array(458);
+    else if (lenta || !ultP || scheda === "dispositivi" && Date.now() < nomiPnFino) ultP = await leggiArea(BLOCCHI.pn);
+    else ultP.set(inByte(await leggiCampo("dbPn", 20)));        // byte 0..39: configurati e presenti
+    if (!self.config.dbCpu) ultCpu = null;
+    else if (lenta || !ultCpu || scheda === "cpu") ultCpu = decodificaCpu(await leggiArea(BLOCCHI.cpu));
+    await leggiEventi(b);
     let abilitato = true;
     if (self.config.abilitaComandi) abilitato = !!(await leggiCampo("abilitaComandi", 1))[0];
-    stato = decodifica(b, e, p, abilitato);
-    stato.cpu = c ? decodificaCpu(c) : null;
+    stato = decodifica(b, ultE, ultP, abilitato);
+    stato.cpu = ultCpu;
     vitaMossa = vitaPrec !== null && stato.vita !== vitaPrec;
     vitaFerma = vitaPrec !== null && stato.vita === vitaPrec ? vitaFerma + 1 : 0;
     vitaPrec = stato.vita;
@@ -192,7 +209,7 @@ async function comandoPlc(tipo) {
     const campo = { approva: "cmdApprova", sblocca: "cmdSblocca", rileggi: "pnRileggi", azzera: "cpuAzzera" }[tipo];
     if (!self.config[campo]) throw new Error("campo " + campo + " non configurato");
     await driver.promises.setData(self.config[campo], [1]);
-    if (tipo === "rileggi") avvisa("Lettura dei nomi PROFINET avviata.", false);
+    if (tipo === "rileggi") { nomiPnFino = Date.now() + 60000; avvisa("Lettura dei nomi PROFINET avviata.", false); }
     else if (tipo === "azzera") avvisa("Tempo di ciclo minimo e massimo azzerati.", false);
     else {
       inAttesa = { tipo: tipo, fino: Date.now() + 20000,
@@ -387,20 +404,110 @@ async function controllaEthernet() {
   disegna();
 }
 
-// ------------------------------------------------------------------ disegno: strumenti
-function font(px, b) { canvas.font = (b ? "bold " : "") + px + "px " + FONT; }
-function larghezza(t) { return canvas.measureText ? canvas.measureText(t).width : t.length * 7; }
-function testo(t, x, y, maxW, colore, allinea) {
-  t = String(t);
-  canvas.fillStyle = colore || COL.inchiostro;
-  canvas.textAlign = allinea || "left";
-  if (maxW && larghezza(t) > maxW) { while (t.length > 1 && larghezza(t + "…") > maxW) t = t.slice(0, -1); t += "…"; }
-  canvas.fillText(t, x, y);
+// ------------------------------------------------------------------ registro degli eventi del PLC
+// Il buffer circolare Eventi (32 x 32 byte dal byte 70) si legge solo con la scheda Registro aperta
+// e solo quando SeqUltimo (byte 4, gia' letto ogni secondo con dbStato) cambia.
+let eventi = null, eventiSeq = null, eventiErrore = "", seqVisto = null, pagina = 0;
+async function leggiEventi(b) {
+  const seq = i32(b, 4);
+  if (seqVisto === null || seq < seqVisto) seqVisto = seq;          // all'avvio, o DB reinizializzato
+  if (scheda !== "registro") return;
+  seqVisto = seq;
+  if (!self.config.dbEventi || seq === eventiSeq) return;
+  try {
+    const v = await leggiArea(BLOCCHI.eventi), out = [];
+    for (let o = 0; o < 1024; o += 32) {
+      if (i32(v, o) <= 0) continue;
+      const anno = (v[o + 8] << 8) | v[o + 9];
+      out.push({ seq: i32(v, o), tipo: i16(v, o + 4), indice: i16(v, o + 6), extra: i32(v, o + 20) >>> 0,
+                 ora: anno ? new Date(anno, v[o + 10] - 1, v[o + 11], v[o + 13], v[o + 14], v[o + 15]) : null,
+                 prima: f32(v, o + 24), dopo: f32(v, o + 28) });
+    }
+    eventi = out.sort((x, y) => y.seq - x.seq);
+    eventiSeq = seq;
+    eventiErrore = "";
+  } catch (err) {
+    eventiErrore = (err && err.message) || String(err);
+  }
 }
+
+const TIPI_EVENTO = {
+  2: "Programma e hardware approvati", 3: "Programma diverso da quello approvato", 4: "Programma tornato uguale a quello approvato",
+  5: "Firma F cambiata", 6: "Avvio automatico bloccato", 7: "Avvio automatico sbloccato", 8: "Errore nella lettura del checksum",
+  9: "CPU diversa da quella approvata", 10: "Quadro aperto", 11: "Quadro chiuso", 12: "Manutenzione inserita",
+  13: "Manutenzione disinserita", 17: "Firmware e seriale della CPU non leggibili",
+};
+function testoEvento(ev) {
+  const par = NOMI_PARAMETRI[ev.indice - 1] || "Parametro " + ev.indice;
+  const pn = () => { const d = stato && stato.profinet.find(x => x.n === ev.indice); return d ? d.nome : "n. " + ev.indice; };
+  const riga = () => { const r = ethRighe.find(x => x.riga === ev.indice); return r ? r.nome || r.ip : "riga " + ev.indice; };
+  switch (ev.tipo) {
+    case 1: return "Avvio del programma PLC" + (ev.dopo >= 1 ? " (avvio n. " + Math.round(ev.dopo) + ")" : "");
+    case 14: return par + ": " + numero(ev.prima) + " -> " + numero(ev.dopo);
+    case 15: return par + ": " + numero(ev.dopo) + " fuori limite rifiutato, resta " + numero(ev.prima);
+    case 16: return "Limiti di " + par + ": " + numero(ev.prima) + " - " + numero(ev.dopo) + (ev.extra ? "" : " (disattivati)");
+    case 18: case 19: return "PROFINET " + pn() + (ev.tipo === 18 ? " offline" : " di nuovo online");
+    case 20: case 21: return "Ethernet " + riga() + (ev.tipo === 20 ? " offline" : " di nuovo online");
+    case 26: return "Nome PROFINET n. " + ev.indice + " non leggibile";
+    default: return TIPI_EVENTO[ev.tipo] || "Evento " + ev.tipo;
+  }
+}
+function coloreEvento(t) {
+  return [3, 5, 6, 9].indexOf(t) >= 0 ? COL.allarme : [7, 8, 10, 15, 16, 17, 18, 20, 26].indexOf(t) >= 0 ? COL.att : COL.inchiostro;
+}
+
+// ------------------------------------------------------------------ disegno: strumenti
+// disegna() prepara l'elenco delle operazioni; il Canvas viene ridisegnato solo se l'elenco e'
+// diverso da quello gia' sullo schermo. Larghezze e testi accorciati restano in memoria.
+let ops = [], opsSchermo = "", fontAtt = "13px " + FONT, base = "alphabetic", fontCanvas = "";
+const misure = new Map(), tagli = new Map();
+function font(px, b) { fontAtt = (b ? "bold " : "") + px + "px " + FONT; }
+function misura(t) {
+  if (!canvas.measureText) return t.length * 7;
+  if (fontCanvas !== fontAtt) { canvas.font = fontAtt; fontCanvas = fontAtt; }
+  return canvas.measureText(t).width;
+}
+function larghezza(t) {
+  const k = fontAtt + "|" + t;
+  let w = misure.get(k);
+  if (w === undefined) { if (misure.size > 2000) misure.clear(); w = misura(t); misure.set(k, w); }
+  return w;
+}
+function taglia(t, maxW) {
+  if (!maxW || larghezza(t) <= maxW) return t;
+  const k = fontAtt + "|" + maxW + "|" + t;
+  let r = tagli.get(k);
+  if (r === undefined) {
+    let lo = 1, hi = t.length - 1;               // il prefisso piu' lungo che sta con "…" (almeno 1 carattere)
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (misura(t.slice(0, m) + "…") <= maxW) lo = m; else hi = m - 1; }
+    r = t.slice(0, lo) + "…";
+    if (tagli.size > 1000) tagli.clear();
+    tagli.set(k, r);
+  }
+  return r;
+}
+function testo(t, x, y, maxW, colore, allinea) {
+  ops.push(["t", taglia(String(t), maxW), x, y, colore || COL.inchiostro, allinea || "left", base, fontAtt]);
+}
+function rettangolo(x, y, w, h, colore) { ops.push(["r", x, y, w, h, colore]); }
 function riquadro(x, y, w, h, fondo, bordo) {
-  canvas.fillStyle = fondo;
-  canvas.fillRect(x, y, w, h);
-  if (bordo) { canvas.strokeStyle = bordo; canvas.lineWidth = 1; canvas.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); }
+  rettangolo(x, y, w, h, fondo);
+  if (bordo) ops.push(["s", x + 0.5, y + 0.5, w - 1, h - 1, bordo]);
+}
+function mostra() {
+  const firma = ops.join("\n");
+  if (firma === opsSchermo) return;
+  opsSchermo = firma;
+  const c = canvas, st = {};
+  const imposta = (k, v) => { if (st[k] !== v) { c[k] = v; st[k] = v; } };
+  ops.forEach(o => {
+    if (o[0] === "t") {
+      imposta("fillStyle", o[4]); imposta("textAlign", o[5]); imposta("textBaseline", o[6]); imposta("font", o[7]);
+      c.fillText(o[1], o[2], o[3]);
+    } else if (o[0] === "r") { imposta("fillStyle", o[5]); c.fillRect(o[1], o[2], o[3], o[4]); }
+    else { imposta("strokeStyle", o[5]); imposta("lineWidth", 1); c.strokeRect(o[1], o[2], o[3], o[4]); }
+  });
+  fontCanvas = st.font || fontCanvas;
 }
 function bottone(x, y, w, h, etichetta, azione, opz) {
   opz = opz || {};
@@ -409,9 +516,9 @@ function bottone(x, y, w, h, etichetta, azione, opz) {
   let fs = Math.min(16, Math.round(h * 0.36));
   font(fs, true);
   while (fs > 10 && larghezza(etichetta) > w - 10) { fs -= 1; font(fs, true); }
-  canvas.textBaseline = "middle";
+  base = "middle";
   testo(etichetta, x + w / 2, y + h / 2, w - 8, primario ? COL.bianco : attivo ? COL.petrolio : COL.tenue, "center");
-  canvas.textBaseline = "alphabetic";
+  base = "alphabetic";
   if (attivo) bottoni.push({ x: x, y: y, w: w, h: h, azione: azione });
 }
 function a_capo(t, x, y, maxW, passo, colore) {
@@ -487,22 +594,23 @@ function condizione() {
 }
 
 function disegna() {
-  bottoni = [];
+  bottoni = []; ops = []; base = "alphabetic";
   riquadro(0, 0, W, H, COL.fondo);
-  const hT = 36, lw = 120;
-  [["stato", "Stato"], ["parametri", "Parametri"], ["dispositivi", "Dispositivi"], ["cpu", "CPU"]].forEach((t, i) => {
+  const hT = 36, lw = Math.min(120, Math.floor((W - 48) / 5));
+  const nuovi = stato && seqVisto !== null && scheda !== "registro" ? Math.min(99, stato.seq - seqVisto) : 0;
+  [["stato", "Stato"], ["parametri", "Parametri"], ["dispositivi", "Dispositivi"], ["cpu", "CPU"],
+   ["registro", nuovi > 0 ? "Registro (" + nuovi + ")" : "Registro"]].forEach((t, i) => {
     const x = 12 + i * (lw + 6), sel = scheda === t[0];
     font(14, sel);
-    canvas.textBaseline = "middle";
+    base = "middle";
     testo(t[1], x + lw / 2, hT / 2, lw, sel ? COL.inchiostro : COL.tenue, "center");
-    canvas.textBaseline = "alphabetic";
-    if (sel) { canvas.fillStyle = COL.petrolio; canvas.fillRect(x + 10, hT - 4, lw - 20, 3); }
-    bottoni.push({ x: x, y: 0, w: lw, h: hT, azione: () => { scheda = t[0]; disegna(); } });
+    base = "alphabetic";
+    if (sel) rettangolo(x + 10, hT - 4, lw - 20, 3, COL.petrolio);
+    bottoni.push({ x: x, y: 0, w: lw, h: hT, azione: () => { scheda = t[0]; pagina = 0; forzaLettura = true; disegna(); leggi(); } });
   });
   const c = condizione(), yF = hT + 6;
   riquadro(12, yF, W - 24, 56, c[2]);
-  canvas.fillStyle = c[3];
-  canvas.fillRect(12, yF, 6, 56);
+  rettangolo(12, yF, 6, 56, c[3]);
   font(19, true); testo(c[0], 30, yF + 25, W - 60, c[3]);
   font(13); testo(c[1], 30, yF + 45, W - 60);
   const y0 = yF + 66, hPiede = 58, h = H - y0 - hPiede - 8;
@@ -510,18 +618,18 @@ function disegna() {
   if (scheda === "stato") disegnaStato(y0, h);
   else if (scheda === "parametri") disegnaParametri(y0, h);
   else if (scheda === "cpu") disegnaCpu(y0, h);
+  else if (scheda === "registro") disegnaRegistro(y0, h);
   else disegnaDispositivi(y0, h);
   disegnaPiede(H - hPiede);
   if (dialogo) disegnaDialogo();
+  mostra();
 }
 
+// senza il tempo di ciclo, che cambia a ogni lettura: la scheda Stato resta ferma e non si ridisegna
 function testoCpu() {
-  const cpu = statoCpu(), c = stato && stato.cpu;
+  const cpu = statoCpu();
   if (!cpu) return "";
-  const parti = [cpu.testo];
-  if (c && cpu.modo === "RUN") parti.push("ciclo " + ms(c.ciclo));
-  if (oraCpuErrata()) parti.push("orologio " + testoDifferenza(c.differenza));
-  return parti.join(", ");
+  return cpu.testo + (oraCpuErrata() ? ", orologio " + testoDifferenza(stato.cpu.differenza) : "");
 }
 
 function disegnaStato(y0, h) {
@@ -621,9 +729,9 @@ function disegnaDispositivi(y0, h) {
     const x = 20 + i * (sw + 8), sel = vista === t[0];
     riquadro(x, y0 + 8, sw, 30, sel ? COL.petrolio : COL.pannello, sel ? COL.petrolio : COL.riga);
     font(13, true);
-    canvas.textBaseline = "middle";
+    base = "middle";
     testo(t[1], x + sw / 2, y0 + 23, sw - 10, sel ? COL.bianco : COL.inchiostro, "center");
-    canvas.textBaseline = "alphabetic";
+    base = "alphabetic";
     bottoni.push({ x: x, y: y0 + 8, w: sw, h: 30, azione: () => { vista = t[0]; disegna(); } });
   });
   if (vista === "macchina") disegnaMacchina(y0 + 44, h - 44);
@@ -638,7 +746,7 @@ function tabella(y0, h, intestazioni, colonne, righe, hAzioni) {
   righe.forEach(r => {
     y += passo;
     if (y > y0 + h - hAzioni - 4) return;
-    if (r.fondo) { canvas.fillStyle = r.fondo; canvas.fillRect(14, y - passo + 8, W - 28, passo - 2); }
+    if (r.fondo) rettangolo(14, y - passo + 8, W - 28, passo - 2, r.fondo);
     r.celle.forEach((c, i) => {
       font(14, i === 0 || i === 3);
       testo(c[0], colonne[i], y, (colonne[i + 1] || W - 20) - colonne[i] - 8, c[1] || COL.inchiostro);
@@ -687,6 +795,28 @@ function disegnaRete(y0, h) {
   }));
   tabella(y0, h, ["Indirizzo IP", "Nome", "MAC", "Stato", "Commento"], [24, W * 0.20, W * 0.40, W * 0.60, W * 0.76], righe, 0);
   if (!righe.length) { font(14); testo("Nessun dispositivo trovato finora.", 24, y0 + 56, W - 60, COL.tenue); }
+}
+
+// ------------------------------------------------------------------ disegno: registro
+function disegnaRegistro(y0, h) {
+  const nota = t => { font(14); a_capo(t, 26, y0 + 30, W - 60, 20, COL.tenue); };
+  if (!self.config.dbEventi) return nota("Campo dbEventi non configurato nella scheda Config (DB n byte 70, Conteggio 512): gli eventi del PLC non si possono mostrare.");
+  if (eventiErrore) return nota("Eventi non leggibili: " + eventiErrore);
+  if (!eventi) return nota("Lettura del registro…");
+  if (!eventi.length) return nota("Nessun evento nel PLC.");
+  const hAzioni = 48, perPagina = Math.max(1, Math.floor((h - hAzioni - 8) / 26) - 1);
+  const pagine = Math.ceil(eventi.length / perPagina);
+  pagina = Math.min(pagina, pagine - 1);
+  const righe = eventi.slice(pagina * perPagina, (pagina + 1) * perPagina).map(ev => ({
+    celle: [[String(ev.seq), COL.tenue], [dataOra(ev.ora) || "–", COL.tenue], [testoEvento(ev), coloreEvento(ev.tipo)]],
+  }));
+  tabella(y0, h, ["N.", "Data e ora (CPU)", "Evento"], [24, 96, 270], righe, hAzioni);
+  const yA = y0 + h - hAzioni + 6;
+  bottone(20, yA, 150, 36, "Più recenti", () => { pagina -= 1; disegna(); }, { disattivo: pagina === 0 });
+  bottone(180, yA, 150, 36, "Meno recenti", () => { pagina += 1; disegna(); }, { disattivo: pagina >= pagine - 1 });
+  font(12);
+  testo("Pagina " + (pagina + 1) + " di " + pagine + ". Il PLC conserva gli ultimi 32 eventi, lo storico completo è nel registratore.",
+        342, yA + 23, W - 362, COL.tenue);
 }
 
 function disegnaPiede(yP) {
@@ -796,7 +926,7 @@ function disegnaEditor() {
     const sel = d.campo === c;
     font(12); testo(etichette[c], cx, cy + 12, cw, COL.tenue);
     riquadro(cx, cy + 18, cw, 36, COL.bianco, sel ? COL.petrolio : COL.riga);
-    if (sel) { canvas.fillStyle = COL.petrolio; canvas.fillRect(cx, cy + 52, cw, 2); }
+    if (sel) rettangolo(cx, cy + 52, cw, 2, COL.petrolio);
     font(16, true); testo(d[c] + (sel ? "|" : ""), cx + 8, cy + 42, cw - 16, COL.inchiostro);
     bottoni.push({ x: cx, y: cy, w: cw, h: 54, azione: () => { d.campo = c; disegna(); } });
   };
