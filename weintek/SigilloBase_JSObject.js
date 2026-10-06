@@ -12,6 +12,8 @@
  *   ethStato        assoluto, DB n byte 1396, Conteggio 3     (il pannello scrive lo stato Ethernet)
  *   dbCpu           assoluto, DB n byte 1822, Conteggio 17    (stato della CPU, facoltativo)
  *   dbEventi        assoluto, DB n byte 70,   Conteggio 512   (scheda Registro, facoltativo)
+ *   ioIngressi      assoluto, area I (ingressi) dal byte IO.ingressi, Conteggio IO.paroleIngressi (scheda I/O, facoltativo)
+ *   ioUscite        assoluto, area Q (uscite)   dal byte IO.uscite,   Conteggio IO.paroleUscite   (scheda I/O, facoltativo)
  *   ethMemoria      Local HMI, RW (es. RW-1000), 16-bit Unsigned, Conteggio 192 (elenco Ethernet, ritentivo)
  *   cmdApprova      tag DB_SigilloBase.Cmd.ImpostaRiferimento   Bit
  *   cmdSblocca      tag DB_SigilloBase.Cmd.SbloccaAvvio         Bit
@@ -37,9 +39,13 @@ const NOMI_PARAMETRI = [
   "Parametro 9", "Parametro 10", "Parametro 11", "Parametro 12", "Parametro 13", "Parametro 14",
   "Parametro 15", "Parametro 16",
 ];
+// Scheda I/O: per i campi ioIngressi / ioUscite, primo byte (per le etichette I0.0, Q4.1...) e numero di
+// parole lette (= Conteggio nella Config, 1 parola = 2 byte, massimo 16); nomi facoltativi dei singoli bit. Gli ingressi e le uscite si leggono direttamente dalle aree I e Q:
+// non occupano nulla nel DB.
+const IO = { ingressi: 0, paroleIngressi: 4, uscite: 0, paroleUscite: 4 };
+const NOMI_IO = { "I0.0": "Emergenza", "Q0.0": "Lampada allarme" };
 const FONT = "Arial";
 const SONDA_OGNI_MS = 5000, SONDA_TENTATIVI_OFFLINE = 3, REGISTRATORE_OGNI_MS = 5000;
-const TOLLERANZA_ORA_S = 60;   // differenza massima tra l'orologio della CPU e quello di riferimento
 
 // ------------------------------------------------------------------ costanti
 // [campo, parole, byte di partenza]; i campi con numero sono facoltativi (lettura divisa)
@@ -70,7 +76,6 @@ const eth = Array.from({ length: 16 }, () => ({ chiave: "", online: null, mancat
 let ethVita = 0, sondaInCorso = false;
 // dati del registratore
 let reg = null, regUltimo = 0, regErrore = "", regInCorso = false, ultimoInvioEth = 0;
-let pannelloMenoReg = null;    // secondi: orologio del pannello meno quello del registratore
 
 // ------------------------------------------------------------------ decodifica
 function inByte(v) {
@@ -97,13 +102,10 @@ function firmware(b, o) {
 }
 function numero(v) { return Math.abs(v) >= 1000 || Number.isInteger(v) ? String(Math.round(v * 100) / 100) : v.toFixed(2); }
 
-// Stato della CPU scritto dal FB (byte 1822..1855): tempi di ciclo, ora, avvii, tempo dall'avvio
+// Stato della CPU scritto dal FB (byte 1822..1855): tempi di ciclo, avvii, tempo dall'avvio.
+// L'ora della CPU (byte 1834) non si mostra.
 function decodificaCpu(c) {
-  const anno = (c[12] << 8) | c[13];
-  const ora = anno ? new Date(anno, c[14] - 1, c[15], c[17], c[18], c[19]) : null;
-  return { ciclo: f32(c, 0), cicloMin: f32(c, 4), cicloMax: f32(c, 8), ora: ora,
-           differenza: ora ? Math.round((ora.getTime() - Date.now()) / 1000) : null,   // secondi, + = CPU avanti
-           avvii: i32(c, 24), secondiDaAvvio: i32(c, 28) };
+  return { ciclo: f32(c, 0), cicloMin: f32(c, 4), cicloMax: f32(c, 8), avvii: i32(c, 24), secondiDaAvvio: i32(c, 28) };
 }
 
 // b: byte 0..69 · e: 1094..1363 · p: 1364..1821 (offset relativi)
@@ -180,6 +182,7 @@ async function leggi() {
     if (!self.config.dbCpu) ultCpu = null;
     else if (lenta || !ultCpu || scheda === "cpu") ultCpu = decodificaCpu(await leggiArea(BLOCCHI.cpu));
     await leggiEventi(b);
+    if (scheda === "io") await leggiIo();
     let abilitato = true;
     if (self.config.abilitaComandi) abilitato = !!(await leggiCampo("abilitaComandi", 1))[0];
     stato = decodifica(b, ultE, ultP, abilitato);
@@ -326,11 +329,7 @@ async function aggiornaRegistratore() {
   if (regInCorso || !registratoreConfigurato()) return;
   regInCorso = true;
   const r = await http("GET", REGISTRATORE.url + "/api/pannello?token=" + encodeURIComponent(REGISTRATORE.token));
-  if (r.ok && r.dati) {
-    reg = r.dati; regUltimo = Date.now(); regErrore = "";
-    const t = reg.ora ? Date.parse(reg.ora) : NaN;
-    pannelloMenoReg = isNaN(t) ? null : Math.round((regUltimo - t) / 1000);
-  }
+  if (r.ok && r.dati) { reg = r.dati; regUltimo = Date.now(); regErrore = ""; }
   else regErrore = r.codice === 401 ? "token errato" : r.errore;
   if (Date.now() - ultimoInvioEth > 60000) inviaElencoEth();
   regInCorso = false;
@@ -461,6 +460,21 @@ function coloreEvento(t) {
   return [3, 5, 6, 9].indexOf(t) >= 0 ? COL.allarme : [7, 8, 10, 15, 16, 17, 18, 20, 26].indexOf(t) >= 0 ? COL.att : COL.inchiostro;
 }
 
+// ------------------------------------------------------------------ ingressi e uscite
+// Letti solo con la scheda I/O aperta, a ogni ciclo. Solo visualizzazione: il pannello non scrive le uscite.
+let io = { I: null, Q: null }, ioErrore = "", ioScelto = "";
+function ioConfigurato() { return !!(self.config.ioIngressi || self.config.ioUscite); }
+async function leggiIo() {
+  try {
+    for (const [k, campo, parole] of [["I", "ioIngressi", IO.paroleIngressi], ["Q", "ioUscite", IO.paroleUscite]]) {
+      if (self.config[campo]) io[k] = inByte(await leggiCampo(campo, Math.min(16, parole)));
+    }
+    ioErrore = "";
+  } catch (err) {
+    ioErrore = (err && err.message) || String(err);
+  }
+}
+
 // ------------------------------------------------------------------ disegno: strumenti
 // disegna() prepara l'elenco delle operazioni; il Canvas viene ridisegnato solo se l'elenco e'
 // diverso da quello gia' sullo schermo. Larghezze e testi accorciati restano in memoria.
@@ -568,19 +582,7 @@ function statoCpu() {
   return { modo: "", testo: "in verifica", fonte: "contatore di vita" };
 }
 
-// Orologio della CPU (solo mentre il FB aggiorna l'ora). Il riferimento e' il PC del registratore quando
-// risponde: e' indipendente dal PLC. L'orologio del pannello puo' essere sincronizzato con quello del
-// PLC (impostazioni di sistema del pannello): in quel caso il confronto con il pannello da' sempre "allineata".
-function confrontoOra() {
-  if (!stato || !stato.cpu || !stato.cpu.ora || vitaFerma !== 0) return null;
-  if (registratoreAttivo() && reg.cpu && typeof reg.cpu.differenza_ora_s === "number") {
-    return { diff: reg.cpu.differenza_ora_s, rif: "registratore" };
-  }
-  return { diff: stato.cpu.differenza, rif: "pannello" };
-}
-function oraCpuErrata() { const c = confrontoOra(); return !!c && Math.abs(c.diff) > TOLLERANZA_ORA_S; }
-
-// Due fasce sempre visibili: programma e CPU sopra, dispositivi e orologio sotto, ognuna con il suo colore.
+// Due fasce sempre visibili: programma e CPU sopra, dispositivi sotto, ognuna con il suo colore.
 function condizioneProgramma() {
   if (errore) return ["PLC non raggiungibile", errore, COL.allarmeFondo, COL.allarme];
   if (!stato) return ["Lettura in corso…", "", COL.pannello, COL.tenue];
@@ -602,17 +604,13 @@ function condizioneProgramma() {
 
 function condizioneCollegamenti() {
   if (errore || !stato) return ["Dispositivi", "–", COL.pannello, COL.tenue];
-  const att = registratoreAttivo(), ora = oraCpuErrata() ? confrontoOra() : null;
-  const orologio = ora ? "CPU " + testoDifferenza(ora.diff) + " rispetto al " + ora.rif + ": date del registro sbagliate" : "";
+  const att = registratoreAttivo();
   const titolo = att && reg.esterni ? "Dispositivo esterno collegato alla rete"
                : macchinaOffline().length ? "Dispositivo della macchina offline"
                : att && reg.noti_offline ? "Dispositivo noto offline"
-               : att && reg.accesso_cpu ? "Accesso alla CPU segnalato"
-               : ora ? "Orologio della CPU sbagliato" : "";
-  if (titolo === "Orologio della CPU sbagliato") return [titolo, orologio, COL.attFondo, COL.att];
-  const dettaglio = testoCollegamenti() + (ora ? "; orologio: " + orologio : "");
-  if (titolo) return [titolo, dettaglio, COL.attFondo, COL.att];
-  return ["Dispositivi online", dettaglio, COL.okFondo, COL.ok];
+               : att && reg.accesso_cpu ? "Accesso alla CPU segnalato" : "";
+  if (titolo) return [titolo, testoCollegamenti(), COL.attFondo, COL.att];
+  return ["Dispositivi online", testoCollegamenti(), COL.okFondo, COL.ok];
 }
 
 function fascia(y, h, c) {
@@ -627,10 +625,11 @@ function fascia(y, h, c) {
 function disegna() {
   bottoni = []; ops = []; base = "alphabetic";
   riquadro(0, 0, W, H, COL.fondo);
-  const hT = 36, lw = Math.min(120, Math.floor((W - 48) / 5));
   const nuovi = stato && seqVisto !== null && scheda !== "registro" ? Math.min(99, stato.seq - seqVisto) : 0;
-  [["stato", "Stato"], ["parametri", "Parametri"], ["dispositivi", "Dispositivi"], ["cpu", "CPU"],
-   ["registro", nuovi > 0 ? "Registro (" + nuovi + ")" : "Registro"]].forEach((t, i) => {
+  const schede = [["stato", "Stato"], ["parametri", "Parametri"], ["dispositivi", "Dispositivi"], ["cpu", "CPU"]]
+    .concat(ioConfigurato() ? [["io", "I/O"]] : [], [["registro", nuovi > 0 ? "Registro (" + nuovi + ")" : "Registro"]]);
+  const hT = 36, lw = Math.min(120, Math.floor((W - 24 - 6 * (schede.length - 1)) / schede.length));
+  schede.forEach((t, i) => {
     const x = 12 + i * (lw + 6), sel = scheda === t[0];
     font(14, sel);
     base = "middle";
@@ -648,6 +647,7 @@ function disegna() {
   else if (scheda === "parametri") disegnaParametri(y0, h);
   else if (scheda === "cpu") disegnaCpu(y0, h);
   else if (scheda === "registro") disegnaRegistro(y0, h);
+  else if (scheda === "io") disegnaIo(y0, h);
   else disegnaDispositivi(y0, h);
   disegnaPiede(H - hPiede);
   if (dialogo) disegnaDialogo();
@@ -658,7 +658,7 @@ function disegna() {
 function testoCpu() {
   const cpu = statoCpu();
   if (!cpu) return "";
-  return cpu.testo + (oraCpuErrata() ? ", orologio " + testoDifferenza(confrontoOra().diff) : "");
+  return cpu.testo;
 }
 
 function disegnaStato(y0, h) {
@@ -672,7 +672,7 @@ function disegnaStato(y0, h) {
     ["Quadro / manutenzione", stato ? (s.quadroAperto ? "quadro aperto" : "quadro chiuso") + ", " +
                                       (s.manutenzione ? "manutenzione inserita" : "manutenzione non inserita") : "", s.quadroAperto],
     ["Avvio automatico", stato ? (s.avvioBloccato ? "bloccato" : "consentito") : "", s.avvioBloccato],
-    ["Stato della CPU", testoCpu(), !!stato && !!statoCpu() && ["STOP", "FB", "FERMO"].indexOf(statoCpu().modo) >= 0 || oraCpuErrata()],
+    ["Stato della CPU", testoCpu(), !!stato && !!statoCpu() && ["STOP", "FB", "FERMO"].indexOf(statoCpu().modo) >= 0],
     ["Collegamenti", testoCollegamenti(), !!stato && (macchinaOffline().length > 0 || (registratoreAttivo() && (reg.esterni || reg.noti_offline || reg.accesso_cpu)))],
   ];
   const passo = Math.max(20, Math.min(40, Math.floor((h - 8) / righe.length)));
@@ -716,32 +716,21 @@ function durata(s) {
   if (s < 172800) return Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min";
   return Math.floor(s / 86400) + " g " + Math.floor(s % 86400 / 3600) + " h";
 }
-function testoDifferenza(d) { return d === 0 ? "allineata" : (d > 0 ? "avanti" : "indietro") + " di " + durata(d); }
 function ms(v) { return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " ms"; }
 
 function disegnaCpu(y0, h) {
   const cpu = statoCpu(), c = stato && stato.cpu;
   if (stato && !self.config.dbCpu) {
     font(14);
-    a_capo("Campo dbCpu non configurato nella scheda Config (DB n byte 1822, Conteggio 17): tempi di ciclo, ora e avvii non disponibili.",
+    a_capo("Campo dbCpu non configurato nella scheda Config (DB n byte 1822, Conteggio 17): tempi di ciclo e avvii non disponibili.",
            26, y0 + 30, W - 60, 20, COL.tenue);
   }
   const fermo = !cpu || cpu.modo === "STOP" || cpu.modo === "FB" || cpu.modo === "FERMO";
   const righe = [["Stato della CPU", cpu ? cpu.testo + " (" + cpu.fonte + ")" : "", !!cpu && fermo]];
   if (c) {
-    const conf = confrontoOra(), errata = oraCpuErrata(), suReg = !!conf && conf.rif === "registratore";
-    const scarto = (d, rif) => !conf ? "–" : "CPU " + testoDifferenza(d) + (errata && conf.rif === rif ? ": date del registro sbagliate" : "");
-    const pannello = dataOra(new Date()) + (registratoreAttivo() && pannelloMenoReg !== null && Math.abs(pannelloMenoReg) > 2
-                     ? " (" + (pannelloMenoReg > 0 ? "avanti" : "indietro") + " di " + durata(pannelloMenoReg) + " sul registratore)" : "");
     righe.push(
       ["Tempo di ciclo attuale", fermo ? "– (FB fermo)" : ms(c.ciclo)],
       ["Tempo di ciclo min / max", ms(c.cicloMin) + " / " + ms(c.cicloMax)],
-      ["Ora della CPU", dataOra(c.ora) + (fermo && c.ora ? " (ferma)" : "")],
-      ["Ora del pannello", pannello]);
-    if (suReg) righe.push(["Rispetto al registratore", scarto(conf.diff, "registratore"), errata]);
-    righe.push(
-      ["Rispetto al pannello", !c.ora || fermo ? "–" : scarto(c.differenza, "pannello") +
-       (suReg && Math.abs(c.differenza) <= 5 && errata ? " (pannello sincronizzato col PLC?)" : ""), errata && !suReg],
       ["Tempo dall'ultimo avvio", fermo ? "–" : durata(c.secondiDaAvvio)],
       ["Numero di avvii", String(c.avvii)]);
   }
@@ -853,6 +842,42 @@ function disegnaRegistro(y0, h) {
   font(12);
   testo("Pagina " + (pagina + 1) + " di " + pagine + ". Il PLC conserva gli ultimi 32 eventi, lo storico completo è nel registratore.",
         342, yA + 23, W - 362, COL.tenue);
+}
+
+// ------------------------------------------------------------------ disegno: ingressi e uscite
+// Due colonne (ingressi, uscite): una riga per byte, 8 caselle per bit, verdi quando il bit e' a 1.
+// Toccando una casella se ne vede il nome (NOMI_IO) sotto la griglia.
+function disegnaIo(y0, h) {
+  if (ioErrore) { font(14); return a_capo("Ingressi e uscite non leggibili: " + ioErrore, 26, y0 + 30, W - 60, 20, COL.tenue); }
+  const hInfo = 30, colW = (W - 24 - 36) / 2;
+  [["I", "Ingressi", IO.ingressi], ["Q", "Uscite", IO.uscite]].forEach((a, ci) => {
+    const x0 = 30 + ci * (colW + 12), dati = io[a[0]];
+    font(13, true); testo(a[1], x0, y0 + 20, colW, COL.tenue);
+    if (!dati) { font(13); testo(self.config[a[0] === "I" ? "ioIngressi" : "ioUscite"] ? "Lettura…" : "Non configurate", x0, y0 + 44, colW, COL.tenue); return; }
+    const nB = dati.length, passo = Math.max(14, Math.min(30, Math.floor((h - 36 - hInfo) / Math.max(nB, 1))));
+    const lab = 44, cw = Math.min(40, Math.floor((colW - lab) / 8));
+    for (let k = 0; k < nB; k++) {
+      const y = y0 + 30 + k * passo, byte = dati[k];
+      if (y + passo > y0 + h - hInfo) break;
+      font(Math.min(13, passo - 4), true); testo(a[0] + (a[2] + k), x0, y + passo * 0.7, lab - 4, COL.tenue);
+      for (let bit = 0; bit < 8; bit++) {
+        const on = (byte >> bit) & 1, nome = a[0] + (a[2] + k) + "." + bit, x = x0 + lab + bit * cw;
+        riquadro(x, y + 1, cw - 3, passo - 3, on ? COL.ok : COL.bianco, ioScelto === nome ? COL.petrolio : COL.riga);
+        font(Math.min(12, passo - 6)); base = "middle";
+        testo(String(bit), x + (cw - 3) / 2, y + passo / 2, cw - 4, on ? COL.bianco : COL.tenue, "center");
+        base = "alphabetic";
+        bottoni.push({ x: x, y: y, w: cw, h: passo, azione: () => { ioScelto = nome; disegna(); } });
+      }
+    }
+  });
+  font(13);
+  let info = "Tocca un bit per vederne il nome. Solo visualizzazione: il pannello non scrive le uscite.";
+  if (ioScelto) {
+    const area = io[ioScelto[0]], m = /^[IQ](\d+)\.(\d)$/.exec(ioScelto), k = +m[1] - (ioScelto[0] === "I" ? IO.ingressi : IO.uscite);
+    const val = area && k < area.length ? (area[k] >> +m[2]) & 1 : null;
+    info = ioScelto + (NOMI_IO[ioScelto] ? " " + NOMI_IO[ioScelto] : "") + ": " + (val === null ? "–" : val ? "1 (attivo)" : "0");
+  }
+  testo(info, 26, y0 + h - 10, W - 60, ioScelto ? COL.inchiostro : COL.tenue);
 }
 
 function disegnaPiede(yP) {

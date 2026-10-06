@@ -4,7 +4,7 @@ Rileva le modifiche al programma PLC, alla firma del programma di sicurezza e al
 sostituita o firmware aggiornato), registra apertura del quadro e modalità manutenzione, sorveglia
 16 parametri con limiti minimo/massimo, blocca l'avvio automatico finché le modifiche non vengono
 approvate e conserva tutto in un registro a prova di manomissione. Tiene sotto controllo i
-dispositivi della macchina e della rete e lo stato della CPU (RUN/STOP, tempo di ciclo, orologio, avvii).
+dispositivi della macchina e della rete e lo stato della CPU (RUN/STOP, tempo di ciclo, avvii) e mostra ingressi e uscite.
 
 ```
 plc/           1_SigilloBase_Evento.udt, 2_DB_SigilloBase.db, 3_FC_SigilloBaseEvento.scl, 4_FB_SigilloBase.scl
@@ -99,6 +99,8 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | `ethStato` | `61396` | 3 |
 | `dbCpu` | `61822` | 17, facoltativo (scheda CPU) |
 | `dbEventi` | `60070` | 512, facoltativo (scheda Registro) |
+| `ioIngressi` | area **I** (ingressi), dal byte `IO.ingressi` (es. `0`) | `IO.paroleIngressi` (es. 4 = IB0..IB7), facoltativo (scheda I/O) |
+| `ioUscite` | area **Q** (uscite), dal byte `IO.uscite` (es. `0`) | `IO.paroleUscite` (es. 4 = QB0..QB7), facoltativo (scheda I/O) |
 | `ethMemoria` | **Local HMI**, `RW-1000` (registri ritentivi del pannello) | 192 |
 | `cmdApprova` | tag `DB_SigilloBase.Cmd.ImpostaRiferimento` | Bit |
 | `cmdSblocca` | tag `DB_SigilloBase.Cmd.SbloccaAvvio` | Bit |
@@ -117,8 +119,7 @@ altro. Se un blocco lungo dà "cannot get data", dividilo: `dbPn` 62 + `dbPn2` (
 In cima, sopra ogni scheda, ci sono **due fasce**, ognuna con il proprio colore. Così un problema non ne
 nasconde un altro:
 1. **programma e CPU**: approvato / modificato / avvio bloccato / CPU diversa / CPU in STOP;
-2. **dispositivi e orologio**: dispositivi offline, esterni sulla rete, accesso alla CPU, orologio
-   della CPU sbagliato.
+2. **dispositivi**: dispositivi offline, esterni sulla rete, accesso alla CPU.
 - **Parametri**: valori e limiti.
 - **Dispositivi → Macchina**: dispositivi PROFINET con il nome letto da TIA e dispositivi Ethernet
   con IP e porta, stato online/offline e commento. "Aggiungi dispositivo Ethernet" apre l'editor con
@@ -128,8 +129,13 @@ nasconde un altro:
 - **Dispositivi → Rete**: elenco del registratore (IP, nome, MAC, stato, commento). Toccando un
   dispositivo non noto lo si approva; toccando un noto lo si commenta o se ne revoca l'approvazione.
 - **CPU**: RUN/STOP con la sua fonte, tempo di ciclo attuale, minimo e massimo (pulsante "Azzera
-  minimo e massimo" se c'è `cpuAzzera`), ora della CPU confrontata con quella del pannello, tempo
-  dall'ultimo avvio e numero di avvii. Vedi [Stato della CPU](#stato-della-cpu).
+  minimo e massimo" se c'è `cpuAzzera`), tempo dall'ultimo avvio e numero di avvii. Data e ora del
+  PLC non si mostrano. Vedi [Stato della CPU](#stato-della-cpu).
+- **I/O** (solo se nella Config c'è `ioIngressi` o `ioUscite`): ingressi a sinistra e uscite a destra,
+  una riga per byte e una casella per bit, verde quando il bit è a 1. Toccando una casella compaiono il
+  suo indirizzo, il nome scritto in `NOMI_IO` (es. `"I0.0": "Emergenza"`) e il valore. Ingressi e uscite
+  si leggono direttamente dalle aree I e Q della CPU, quindi **non occupano nulla nel DB**. Si leggono
+  solo con la scheda aperta (massimo 16 parole per area). Il pannello non scrive le uscite.
 - **Registro**: gli ultimi 32 eventi del PLC (quelli del buffer `Eventi` nel DB), dal più recente, con
   numero, data e ora della CPU e descrizione (nomi dei parametri, dei dispositivi PROFINET ed Ethernet).
   Si sfoglia a pagine con "Più recenti" / "Meno recenti". Con un'altra scheda aperta, l'etichetta
@@ -209,8 +215,6 @@ Cosa si può sapere in modo affidabile:
 - **RUN o STOP**: il registratore lo legge direttamente dalla CPU con snap7. Il pannello lo deduce dal
   contatore di vita, e lo riceve preciso dal registratore quando è attivo.
 - **Tempo di ciclo** attuale, minimo e massimo, misurato dal FB con l'istruzione `RUNTIME`.
-- **Ora della CPU**, confrontata con quella del pannello: se l'orologio è sbagliato, anche le date del
-  registro lo sono.
 - **Tempo dall'ultimo avvio** e **numero di avvii** della CPU.
 
 Dettagli:
@@ -230,17 +234,9 @@ Dettagli:
 - **Tempo di ciclo.** `RUNTIME` misura il tempo tra due chiamate del FB, quindi il ciclo dell'OB che lo
   chiama (OB1). Minimo e massimo valgono dall'ultimo avvio o dall'ultimo azzeramento; le prime due misure
   dopo l'avvio si scartano.
-- **Ora.** Il FB copia a ogni ciclo l'ora locale della CPU (`RD_LOC_T`, la stessa usata per gli eventi).
-  Il registratore la confronta con l'orologio del PC. Il pannello usa quel confronto quando il
-  registratore risponde, altrimenti confronta l'ora con il proprio orologio. Oltre i 60 s
-  (`tolleranza_ora_s`) segnalano "Orologio della CPU sbagliato".
-  **Attenzione:** se il pannello prende l'ora dal PLC (sincronizzazione dell'orologio nelle impostazioni
-  di sistema del pannello), i due orologi sono sempre uguali e il confronto con il pannello non dice
-  niente. Per questo il riferimento è il registratore. Nella scheda CPU compaiono l'ora della CPU, quella
-  del pannello e i due confronti. Se la CPU è sbagliata rispetto al registratore ma uguale al pannello,
-  compare "(pannello sincronizzato col PLC?)". Il registratore annota l'evento una
-  volta e annota il ritorno nella norma sotto metà della tolleranza. In STOP l'ora nel DB è ferma e il
-  confronto si sospende.
+- **Ora.** Il FB copia ancora l'ora della CPU nel DB (byte 1834), ma il pannello non la mostra e non la
+  controlla. Il registratore la confronta ancora con l'orologio del PC (`tolleranza_ora_s`) e la
+  annota nel registro.
 - **Avvii.** Il contatore sta nel DB a ritenzione e cresce a ogni avvio. Il numero compare anche
   nell'evento 1 del registro ("avvio n. 12"). Il tempo dall'ultimo avvio è la somma dei tempi di ciclo:
   non dipende dall'orologio della CPU.
@@ -301,5 +297,5 @@ python -m pytest -q tests
 ```
 
 Il banco `tests/banco_jsobject.js` esegue il JS Object con Canvas, driver, memoria RW del pannello,
-dispositivi Ethernet e registratore HTTP simulati (55 scenari, compresi il carico sul pannello e la
-scheda Registro).
+dispositivi Ethernet e registratore HTTP simulati (67 scenari, compresi il carico sul pannello, le
+schede Registro e I/O e le due fasce di stato).
