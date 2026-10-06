@@ -162,22 +162,18 @@ function durata(sec) {
   return Math.floor(sec / 86400) + " g " + Math.floor(sec % 86400 / 3600) + " h";
 }
 function mostraCpu(s) {
-  const c = s.cpu || {}, f = $("#fascia-cpu"), d = c.differenza_ora_s;
+  const c = s.cpu || {}, f = $("#fascia-cpu");
   if (!s.connesso) { f.className = "fascia ko"; f.textContent = "PLC non raggiungibile"; }
   else if (c.modo === "STOP") { f.className = "fascia ko"; f.textContent = "CPU in STOP"; }
   else if (c.modo === "RUN" && c.vita_ferma) { f.className = "fascia ko"; f.textContent = "CPU in RUN, ma FB_SigilloBase non è in esecuzione"; }
   else if (!c.modo) { f.className = "fascia nd"; f.textContent = c.vita_ferma ? "CPU in STOP o FB_SigilloBase fermo (stato della CPU non leggibile)"
                                                                                : "Stato della CPU non leggibile" + (c.errore_modo ? ": " + c.errore_modo : ""); }
-  else if (c.ora_errata) { f.className = "fascia nd"; f.textContent = "Orologio della CPU sbagliato: le date degli eventi del PLC non sono affidabili"; }
   else { f.className = "fascia ok"; f.textContent = c.modo === "AVVIO" ? "CPU in avvio" : "CPU in RUN"; }
-  const fermo = c.modo === "STOP" || c.vita_ferma;   // in STOP il FB non aggiorna cicli, ora e tempo dall'avvio
+  const fermo = c.modo === "STOP" || c.vita_ferma;   // in STOP il FB non aggiorna cicli e tempo dall'avvio
   $("#dati-cpu").innerHTML = (c.avvii === undefined ? [["Dati del FB", "non presenti: DB_SigilloBase della v2.0, aggiornalo alla v2.1"]] : [
     ["Modo (snap7)", (c.modo || "non leggibile") + (c.szl_bzu ? " (bzu-id " + c.szl_bzu + ")" : "")],
     ["Tempo di ciclo", fermo ? "– (FB fermo)" : ms(c.ciclo_ms)],
     ["Ciclo minimo / massimo", ms(c.ciclo_min_ms) + " / " + ms(c.ciclo_max_ms)],
-    ["Ora della CPU", dataOra(c.ora) + (fermo ? " (ferma)" : "")],
-    ["Differenza dal PC", d === null || d === undefined || fermo ? "–" : d === 0 ? "nessuna"
-       : "CPU " + (d > 0 ? "avanti" : "indietro") + " di " + durata(d) + (c.ora_errata ? " (oltre " + c.tolleranza_ora_s + " s)" : "")],
     ["Tempo dall'ultimo avvio", fermo ? "–" : durata(c.secondi_da_avvio)],
     ["Numero di avvii", c.avvii]])
     .map(([a, b]) => `<dt>${esc(a)}</dt><dd>${esc(b ?? "–")}</dd>`).join("");

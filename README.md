@@ -99,8 +99,8 @@ per non prendere il risultato del dispositivo precedente. Ogni dispositivo ha 3 
 | `ethStato` | `61396` | 3 |
 | `dbCpu` | `61822` | 17, facoltativo (scheda CPU) |
 | `dbEventi` | `60070` | 512, facoltativo (scheda Registro) |
-| `ioIngressi` | area **I** (ingressi), dal byte `IO.ingressi` (es. `0`) | `IO.paroleIngressi` (es. 4 = IB0..IB7), facoltativo (scheda I/O) |
-| `ioUscite` | area **Q** (uscite), dal byte `IO.uscite` (es. `0`) | `IO.paroleUscite` (es. 4 = QB0..QB7), facoltativo (scheda I/O) |
+| `ioIngressi` | area **I** (ingressi), parola `IW0` | parole fino all'ultimo canale di `IO.moduli` (es. 34 con gli analogici a IW64), facoltativo |
+| `ioUscite` | area **Q** (uscite), parola `QW0` | parole fino all'ultimo canale di `IO.moduli` (es. 1 con 10 uscite), facoltativo |
 | `ethMemoria` | **Local HMI**, `RW-1000` (registri ritentivi del pannello) | 192 |
 | `cmdApprova` | tag `DB_SigilloBase.Cmd.ImpostaRiferimento` | Bit |
 | `cmdSblocca` | tag `DB_SigilloBase.Cmd.SbloccaAvvio` | Bit |
@@ -131,11 +131,27 @@ nasconde un altro:
 - **CPU**: RUN/STOP con la sua fonte, tempo di ciclo attuale, minimo e massimo (pulsante "Azzera
   minimo e massimo" se c'è `cpuAzzera`), tempo dall'ultimo avvio e numero di avvii. Data e ora del
   PLC non si mostrano. Vedi [Stato della CPU](#stato-della-cpu).
-- **I/O** (solo se nella Config c'è `ioIngressi` o `ioUscite`): ingressi a sinistra e uscite a destra,
-  una riga per byte e una casella per bit, verde quando il bit è a 1. Toccando una casella compaiono il
-  suo indirizzo, il nome scritto in `NOMI_IO` (es. `"I0.0": "Emergenza"`) e il valore. Ingressi e uscite
-  si leggono direttamente dalle aree I e Q della CPU, quindi **non occupano nulla nel DB**. Si leggono
-  solo con la scheda aperta (massimo 16 parole per area). Il pannello non scrive le uscite.
+- **I/O** (solo se nella Config c'è `ioIngressi` o `ioUscite`): come nella prima versione, un blocco
+  per ogni modulo scritto in `IO.moduli` in cima al JS Object, con nome e indirizzi (es. "I0.0 - I1.5").
+  I digitali sono LED, 16 per riga, verdi a 1, solo per i canali del modulo; gli analogici hanno una
+  riga per canale con valore grezzo, valore in scala (0..27648 = `min`..`max`) e barra. Se i moduli non
+  stanno in una pagina si sfogliano con "<" / ">". Per esempio, CPU 1214C con un modulo di ampliamento:
+
+  ```js
+  const IO = {
+    moduli: [
+      { nome: "CPU - ingressi digitali", area: "I", byte: 0, bit: 14 },
+      { nome: "CPU - uscite digitali", area: "Q", byte: 0, bit: 10 },
+      { nome: "CPU - ingressi analogici", area: "AI", indirizzo: 64, canali: 2, scala: { min: 0, max: 10, unita: "V" } },
+      { nome: "SM 1223 DI16/DQ16", area: "I", byte: 8, bit: 16 },
+    ],
+    simboli: { "I0.0": "Fungo emergenza", "Q0.0": "Lampada rossa", "IW64": "Pressione" },
+  };
+  ```
+
+  Il pannello legge le aree I e Q dal byte 0 fino all'ultimo canale configurato, solo con la scheda
+  aperta; se la lettura non riesce, la scheda dice quale Conteggio mettere nella Config. Toccando un
+  LED compaiono indirizzo, simbolo e valore. Nulla nel DB, e il pannello non scrive le uscite.
 - **Registro**: gli ultimi 32 eventi del PLC (quelli del buffer `Eventi` nel DB), dal più recente, con
   numero, data e ora della CPU e descrizione (nomi dei parametri, dei dispositivi PROFINET ed Ethernet).
   Si sfoglia a pagine con "Più recenti" / "Meno recenti". Con un'altra scheda aperta, l'etichetta
@@ -162,9 +178,6 @@ In `config.json`:
 "rete": { "abilitato": true, "sottorete": "192.168.0.0/24", "periodo_s": 15,
           "noti": { "192.168.0.1": { "nome": "PLC", "mac": "" } } }
 ```
-
-`"tolleranza_ora_s": 60` è la differenza massima ammessa tra l'orologio della CPU e quello del PC del
-registratore.
 
 `pin_dispositivi` serve per approvare e commentare dalla pagina web; `token_pannello` deve essere
 uguale a `REGISTRATORE.token` nel JS Object.
@@ -234,9 +247,8 @@ Dettagli:
 - **Tempo di ciclo.** `RUNTIME` misura il tempo tra due chiamate del FB, quindi il ciclo dell'OB che lo
   chiama (OB1). Minimo e massimo valgono dall'ultimo avvio o dall'ultimo azzeramento; le prime due misure
   dopo l'avvio si scartano.
-- **Ora.** Il FB copia ancora l'ora della CPU nel DB (byte 1834), ma il pannello non la mostra e non la
-  controlla. Il registratore la confronta ancora con l'orologio del PC (`tolleranza_ora_s`) e la
-  annota nel registro.
+- **Ora.** Il FB copia ancora l'ora della CPU nel DB (byte 1834), ma né il pannello né il registratore
+  la mostrano o la controllano.
 - **Avvii.** Il contatore sta nel DB a ritenzione e cresce a ogni avvio. Il numero compare anche
   nell'evento 1 del registro ("avvio n. 12"). Il tempo dall'ultimo avvio è la somma dei tempi di ciclo:
   non dipende dall'orologio della CPU.
@@ -287,7 +299,7 @@ Il JS Object è scritto per pesare il meno possibile sul cMT-X:
 | 26 | Nome PROFINET non leggibile |
 | registratore | Rete: dispositivi noti online/offline, non noti collegati/scollegati, MAC diverso, approvazioni, revoche |
 | registratore | Commenti, elenco Ethernet del pannello cambiato, token o PIN errati, Syslog della CPU |
-| registratore | CPU in STOP / di nuovo in RUN, FB non in esecuzione con CPU in RUN, orologio della CPU sbagliato / di nuovo allineato |
+| registratore | CPU in STOP / di nuovo in RUN, FB non in esecuzione con CPU in RUN |
 
 ## Test
 
@@ -297,5 +309,5 @@ python -m pytest -q tests
 ```
 
 Il banco `tests/banco_jsobject.js` esegue il JS Object con Canvas, driver, memoria RW del pannello,
-dispositivi Ethernet e registratore HTTP simulati (67 scenari, compresi il carico sul pannello, le
+dispositivi Ethernet e registratore HTTP simulati (69 scenari, compresi il carico sul pannello, le
 schede Registro e I/O e le due fasce di stato).
