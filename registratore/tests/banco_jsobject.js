@@ -39,7 +39,7 @@ function crea(opz) {
   let rw = opz.memoria ? memoriaEth(opz.memoria) : new Array(192).fill(0);
   const scritture = [], richieste = [];
   let testi = [], click = null;
-  const conta = { disegni: 0, testi: 0, misure: 0, parole: 0 };   // lavoro del pannello (prestazioni)
+  const conta = { disegni: 0, testi: 0, misure: 0, parole: 0, io: 0 };   // lavoro del pannello (prestazioni)
   const timer = [];
   class Canvas {
     constructor() { this.width = W; this.height = H; this.font = "13px Arial"; this.textAlign = "left"; }
@@ -54,6 +54,8 @@ function crea(opz) {
                    dbCpu: { byte: 1822 }, cpuAzzera: { bitAddr: 1854 }, dbEventi: { byte: 70 } };
   if (opz.senzaCpu) { delete config.dbCpu; delete config.cpuAzzera; }
   if (opz.senzaEventi) delete config.dbEventi;
+  if (opz.io) Object.assign(config, { ioIngressi: { area: "I" }, ioUscite: { area: "Q" } });
+  const aree = { I: Buffer.alloc(32), Q: Buffer.alloc(32) };     // immagine di processo simulata
   if (opz.diviso) Object.assign(config, { dbPn2: { byte: 1488 }, dbPn3: { byte: 1612 }, dbPn4: { byte: 1736 }, dbEst2: { byte: 1218 }, dbEst3: { byte: 1342 } });
   if (opz.diviso) for (let k = 2; k <= 9; k++) config["dbEventi" + k] = { byte: 70 + (k - 1) * 124 };
   if (opz.abilita !== undefined) config.abilitaComandi = { lb: true };
@@ -63,6 +65,7 @@ function crea(opz) {
       if (opz.diviso && n > 62) throw new Error("cannot get data");
       if (a.lb) return { values: [opz.abilita ? 1 : 0] };
       if (a.rw) return { values: rw.slice(0, n) };
+      if (a.area) { const v = []; for (let i = 0; i < n; i++) v.push(aree[a.area].readUInt16BE(2 * i)); conta.parole += n; conta.io += n; return { values: v }; }
       conta.parole += n;
       if (!opz.vitaFerma && a.byte === 0) db.writeInt32BE(db.readInt32BE(0) + 1, 0);
       const v = []; for (let i = 0; i < n; i++) v.push(db.readUInt16BE(a.byte + 2 * i)); return { values: v };
@@ -115,11 +118,12 @@ function crea(opz) {
   new Function("driver", "Canvas", "MouseArea", "setInterval", "net", codice)
     .call({ widget: { add() {} }, config }, driver, Canvas, MouseArea, f => { timer.push(f); }, net);
   return {
-    db, scritture, richieste, statoReg, conta, rw: () => rw, testi: () => testi.map(x => x.t).join(" | "),
+    db, scritture, richieste, statoReg, conta, aree, rw: () => rw, testi: () => testi.map(x => x.t).join(" | "),
     async ciclo(n = 1) { for (let i = 0; i < n; i++) { timer[0](); await pausa(5); } },
     async sonda(n = 1) { for (let i = 0; i < n; i++) { timer[1](); await pausa(15); } },
     async registratore() { timer[2](); await pausa(15); },
     async scrivi(t) { for (const ch of t) await this.clicca(ch === " " ? "Spazio" : ch); },
+    async clicca2(indice) { const b = testi[indice]; click({ x: b.x, y: b.y }); await pausa(10); },
     async clicca(et) {
       const b = testi.filter(x => x.t === et).pop();
       if (!b) throw new Error("manca " + et + " in " + testi.map(x => x.t).join(" | "));
@@ -129,7 +133,7 @@ function crea(opz) {
 }
 
 (async () => {
-  const e = {}, v = (k, c) => { e[k] = !!c; };
+  const e = {}, v = (k, c) => { e[k] = !!c; if (!c && process.env.DEBUG) console.error(k, "::", typeof o !== "undefined" && o.testi()); };
   let t;
   const reteEsterno = { rete: [{ ip: "192.168.0.1", nome: "PLC", mac: "00:1B:1B:12:34:56", online: true, noto: true, commento: "", locale: false },
                                { ip: "192.168.0.50", nome: "", mac: "A4:5E:60:AA:BB:CC", online: true, noto: false, commento: "", locale: false },
@@ -211,7 +215,7 @@ function crea(opz) {
 
   // 6. registratore assente o con token sbagliato
   o = crea({ registratoreSpento: true }); await pausa(30); await o.ciclo(); await o.registratore();
-  v("registratore_assente", o.testi().includes("rete esterna non controllata (registratore non raggiungibile)"));
+  v("registratore_assente", o.testi().includes("registratore non raggiungibile"));
   await o.clicca("Dispositivi"); await o.clicca("Rete");
   v("rete_non_raggiungibile", o.testi().includes("Registratore non raggiungibile: errore curl 7."));
   o = crea({ tokenRegistratore: "altro" }); await pausa(30); await o.ciclo(); await o.registratore();
@@ -240,7 +244,8 @@ function crea(opz) {
   await o.clicca("CPU");
   t = o.testi();
   v("cpu_run_dalla_vita", t.includes("RUN (dedotto dal contatore di vita)"));
-  v("cpu_ciclo_e_avvii", /\d\.\d ms/.test(t) && t.includes("Numero di avvii") && t.includes(" | 3 | ") && /CPU (allineata|indietro di 1 s)/.test(t));
+  v("cpu_ciclo_e_avvii", /\d\.\d ms/.test(t) && t.includes("Numero di avvii") && t.includes(" | 3 | "));
+  v("cpu_senza_ora", !t.includes("Ora della CPU") && !t.includes("Rispetto al"));
   await o.clicca("Azzera minimo e massimo");
   v("cpu_azzera", (o.db[1854] & 1) === 1);
   await o.clicca("Stato");
@@ -255,9 +260,9 @@ function crea(opz) {
   // il contatore di vita e' piu' fresco del registratore: se si muove la CPU e' in RUN
   o = crea({ prepara: pnOnline, registratore: { cpu: { modo: "STOP" } } }); await pausa(30); await o.registratore(); await o.ciclo(2);
   v("cpu_vita_piu_fresca", !o.testi().includes("CPU in STOP"));
-  // orologio della CPU indietro di un'ora
+  // l'ora della CPU non si mostra: un orologio sbagliato non accende avvisi
   o = crea({ prepara: db => { pnOnline(db); db[1834 + 5] = (db[1834 + 5] + 23) % 24; } }); await pausa(30); await o.ciclo(2);
-  v("cpu_ora_errata", o.testi().includes("Orologio della CPU sbagliato") && o.testi().includes("indietro di 60 min"));
+  v("cpu_ora_ignorata", !o.testi().includes("Orologio") && o.testi().includes("Dispositivi online"));
   // dbCpu non configurato: RUN/STOP resta, con la spiegazione
   o = crea({ senzaCpu: true }); await pausa(20); await o.ciclo(2);
   await o.clicca("CPU");
@@ -291,6 +296,36 @@ function crea(opz) {
   o = crea({ senzaEventi: true }); await pausa(20); await o.ciclo();
   await o.clicca("Registro");
   v("registro_non_configurato", o.testi().includes("Campo dbEventi non configurato"));
+
+  // 9b. due fasce: il programma approvato resta visibile anche con dispositivi offline
+  o = crea({}); await pausa(20); await o.ciclo(2);
+  t = o.testi();
+  v("fasce_separate", t.includes("Programma uguale a quello approvato") && t.includes("Dispositivo della macchina offline"));
+  o = crea({ prepara: db => { db[12] = (db[12] & ~2) | 8; } }); await pausa(20); await o.ciclo(2);
+  v("fasce_allarme_e_offline", o.testi().includes("Avvio automatico bloccato") && o.testi().includes("Dispositivo della macchina offline"));
+  o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
+  v("fasce_tutto_ok", o.testi().includes("Programma uguale a quello approvato") && o.testi().includes("Dispositivi online"));
+
+  // 9d. ingressi e uscite: letti dalle aree I e Q solo con la scheda aperta, solo visualizzazione
+  o = crea({ prepara: pnOnline }); await pausa(20); await o.ciclo();
+  v("io_scheda_nascosta", !o.testi().includes("I/O"));
+  o = crea({ prepara: pnOnline, io: true }); await pausa(20); await o.ciclo(2);
+  v("io_non_letti_fuori_scheda", o.conta.io === 0);
+  o.aree.I[0] = 0b00000101; o.aree.Q[1] = 0b10000000;
+  await o.clicca("I/O");
+  t = o.testi();
+  v("io_griglia", t.includes("Ingressi") && t.includes("Uscite") && t.includes("I0") && t.includes("I7") && t.includes("Q1"));
+  const c1 = o.conta.io; await o.ciclo();
+  v("io_letti_con_scheda", o.conta.io - c1 === 8);
+  // la casella del bit I0.0 e' la prima con testo "0" dopo l'etichetta I0
+  const tocca = async (riga, bit) => { const L = o.testi().split(" | "); const i = L.indexOf(riga); await o.clicca2(i + 1 + bit); };
+  await tocca("I0", 0);
+  v("io_nome_e_valore", o.testi().includes("I0.0 Emergenza: 1 (attivo)"));
+  await tocca("I0", 1);
+  v("io_bit_spento", o.testi().includes("I0.1: 0"));
+  await tocca("Q1", 7);
+  v("io_uscita", o.testi().includes("Q1.7: 1 (attivo)"));
+  v("io_nessuna_scrittura", !o.scritture.some(a => a.area));
 
   // 10. carico del pannello: letture ridotte e nessun ridisegno se nulla cambia
   o = crea({ prepara: pnOnline, registratoreSpento: true }); await pausa(20); await o.ciclo(2);
